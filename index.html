@@ -1,0 +1,2789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Space Shooter Pro</title>
+  <style>
+    /* ── Reset & Base ─────────────────────────────────────── */
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+      font-family: 'Segoe UI', 'Courier New', monospace;
+    }
+
+    /* ── Canvas fills the full viewport ──────────────────── */
+    #gameCanvas {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+
+  <!-- Plain vanilla JavaScript — no modules, no imports, no external files -->
+  <script>
+    // ═══════════════════════════════════════════════════════════════
+    //  SPACE SHOOTER PRO  |  Game Foundation
+    //  Everything lives in this single index.html file.
+    //  Open directly in any modern browser — no server required.
+    // ═══════════════════════════════════════════════════════════════
+
+    // ── Canvas & 2-D context ─────────────────────────────────────
+    var canvas = document.getElementById('gameCanvas');
+    var ctx    = canvas.getContext('2d');
+
+    // ── Game states ──────────────────────────────────────────────
+    var STATE   = { START: 'start', PLAYING: 'playing', PAUSED: 'paused', GAMEOVER: 'gameover' };
+    var gameState = STATE.START;
+
+    // ── Timing ───────────────────────────────────────────────────
+    var lastTime  = 0;   // DOMHighResTimeStamp of the previous frame
+    var glowPhase = 0;   // drives the pulsing "Press ENTER" animation
+
+    // ── Keyboard state map ───────────────────────────────────────
+    var keys = {};       // keys[keyName] = true while key is held
+
+    // ── Enemy state ──────────────────────────────────────────────
+    var enemies        = [];     // active enemy objects
+    var enemySpawnTimer = 0;     // counts down to next spawn (seconds)
+    var ENEMY_SPAWN_MIN = 1.2;   // minimum seconds between spawns
+    var ENEMY_SPAWN_MAX = 1.8;   // maximum seconds between spawns
+
+    /** Pick a fresh random spawn interval, shrinking slightly each level.
+     *  Floor of 0.55 s keeps the game fair even at extreme levels.
+     */
+    function nextSpawnInterval() {
+      var reduction = Math.min((level - 1) * 0.06, 0.65);   // max 0.65 s reduction
+      var minT = Math.max(ENEMY_SPAWN_MIN - reduction, 0.55);
+      var maxT = Math.max(ENEMY_SPAWN_MAX - reduction, 0.75);
+      return minT + Math.random() * (maxT - minT);
+    }
+
+    // ── Gameplay state ───────────────────────────────────────────
+    var score      = 0;
+    var lives      = 3;
+    var MAX_LIVES  = 3;
+    var particles  = [];   // active explosion particle objects
+    var gameOverGlowPhase = 0;   // drives pulsing prompt on game-over screen
+
+    // ── Level progression state ──────────────────────────────────
+    var level          = 1;          // current level (starts at 1)
+    var SCORE_PER_LEVEL = 100;       // score threshold per level-up
+
+    // Level-up banner animation
+    var levelUpTimer    = 0;         // counts down from LEVEL_UP_DURATION
+    var LEVEL_UP_DURATION = 2.0;     // seconds the banner is visible
+
+    // Camera shake state
+    var shakeTimer     = 0;          // seconds of shake remaining
+    var SHAKE_DURATION = 0.45;       // how long the shake lasts
+    var SHAKE_MAGNITUDE = 8;         // max pixel displacement at full intensity
+
+    // ── Boss state ────────────────────────────────────────────────
+    var boss              = null;    // single boss object or null
+    var bossSpawnTimer    = 30;      // seconds until first boss spawn
+    var BOSS_SPAWN_TIME   = 30;      // respawn interval after a boss is defeated
+    var BOSS_SCORE_TRIGGER = 150;    // also spawn a boss when score hits this
+    var bossScoreTriggered = false;  // prevent the score trigger firing twice
+    var bossBullets        = [];     // bullets fired by the boss
+    var BOSS_MAX_HP        = 30;     // hit points for every boss
+    var BOSS_BULLET_SPEED  = 240;    // pixels per second downward
+    var BOSS_FIRE_INTERVAL = 2.2;    // seconds between boss shots
+    // Flash effect on boss death
+    var deathFlash = { active: false, life: 0, duration: 0.45 };
+
+    // ── Boss arrival countdown state ──────────────────────────────
+    var BOSS_COUNTDOWN_SECS = 8;     // how many seconds before spawn the countdown starts
+    var bossCountdownActive = false; // true while the numeric countdown is visible
+    var bossCountdownValue  = 0;     // integer displayed (8 … 1)
+    var bossCountdownFrac   = 0;     // fractional seconds into current digit (0–1)
+    // Warning banner (shown for 1.5 s after countdown hits 0, then boss spawns)
+    var bossWarningActive   = false;
+    var bossWarningTimer    = 0;
+    var BOSS_WARNING_DURATION = 1.5; // seconds the "BOSS INCOMING" banner shows
+    var bossWarningPhase    = 0;     // drives pulse animation on the banner
+
+    // ── Power-up state ────────────────────────────────────────────
+    // Power-up types
+    var PU = { RAPID: 'rapid', TRIPLE: 'triple', SHIELD: 'shield' };
+
+    // Falling collectible capsules on screen
+    var powerUps      = [];
+    var puSpawnTimer  = 8;         // first power-up drops within 8 seconds
+    var PU_SPAWN_MIN  = 8;         // min seconds between spawns
+    var PU_SPAWN_MAX  = 12;        // max seconds between spawns
+
+    // Active power-up state on the player
+    var activePowerUp   = null;    // PU.RAPID | PU.TRIPLE | PU.SHIELD | null
+    var powerUpTimer    = 0;       // countdown for timed power-ups (seconds)
+    var PU_DURATION     = 5.0;     // how long RAPID / TRIPLE last
+    var shieldActive    = false;   // true while shield absorbs one hit
+
+    // Floating pickup-text notifications
+    var puTexts = [];              // { x, y, vy, text, colour, life, maxLife }
+
+    // Visual config per type
+    var PU_CFG = {
+      rapid:  { colour: '#ff4488', glow: '#ff0066', label: 'RAPID FIRE!' },
+      triple: { colour: '#44ddff', glow: '#0088ff', label: 'TRIPLE SHOT!' },
+      shield: { colour: '#88ff44', glow: '#22cc00', label: 'SHIELD!'      }
+    };
+
+    // ── Shooting state ───────────────────────────────────────────
+    var bullets       = [];      // active bullet objects
+    var shootCooldown = 0;       // seconds remaining before next shot is allowed
+    var SHOOT_DELAY   = 0.16;    // 160 ms between shots
+
+    // Muzzle flash: lives for a few frames after firing
+    var muzzleFlash = {
+      active:   false,
+      x:        0,
+      y:        0,
+      life:     0,    // seconds remaining
+      duration: 0.08  // how long the flash lasts
+    };
+
+    // ── Player ship state ────────────────────────────────────────
+    var ship = {
+      x:          0,       // centre x  (set by initShip)
+      y:          0,       // centre y  (set by initShip)
+      w:          48,      // half-width  of the bounding box
+      h:          56,      // half-height of the bounding box
+      speed:      420,     // pixels per second
+      flamePhase: 0        // drives the animated engine flame
+    };
+
+    // ═══════════════════════════════════════════════════════════════
+    //  STAR LAYERS  —  parallax deep-space background
+    // ═══════════════════════════════════════════════════════════════
+
+    // Three layers: far (slow/tiny) → near (fast/bright)
+    var STAR_LAYERS = [
+      { count: 180, speed: 0.15, size: 0.8, opacity: 0.50 },
+      { count: 100, speed: 0.35, size: 1.4, opacity: 0.70 },
+      { count:  50, speed: 0.70, size: 2.2, opacity: 0.95 }
+    ];
+
+    var stars = [];   // flat array; each entry: { x, y, layer (index) }
+
+    /**
+     * initStars — scatter stars randomly across the current canvas size.
+     * Called on init and again after every resize.
+     */
+    function initStars() {
+      stars = [];
+      for (var li = 0; li < STAR_LAYERS.length; li++) {
+        var layer = STAR_LAYERS[li];
+        for (var i = 0; i < layer.count; i++) {
+          stars.push({
+            x:     Math.random() * canvas.width,
+            y:     Math.random() * canvas.height,
+            layer: li
+          });
+        }
+      }
+    }
+
+    /**
+     * updateStars — scroll every star downward at its layer speed.
+     * Stars that leave the bottom edge wrap to the top.
+     * @param {number} dt  delta time in seconds
+     */
+    function updateStars(dt) {
+      for (var i = 0; i < stars.length; i++) {
+        var star  = stars[i];
+        var layer = STAR_LAYERS[star.layer];
+        star.y += layer.speed * 60 * dt;   // speed=1 → 60 px/s
+        if (star.y > canvas.height) {
+          star.y = 0;
+          star.x = Math.random() * canvas.width;
+        }
+      }
+    }
+
+    /**
+     * renderBackground — gradient sky + all star layers.
+     */
+    function renderBackground() {
+      // Deep-space vertical gradient
+      var grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      grad.addColorStop(0,   '#00001a');
+      grad.addColorStop(0.5, '#000528');
+      grad.addColorStop(1,   '#0a0018');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Stars
+      for (var i = 0; i < stars.length; i++) {
+        var star  = stars[i];
+        var layer = STAR_LAYERS[star.layer];
+        ctx.beginPath();
+        ctx.arc(star.x, star.y, layer.size, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,' + layer.opacity + ')';
+        ctx.fill();
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  START SCREEN
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * renderStartScreen — title, subtitle, controls panel, and pulsing
+     * "Press ENTER to Start" prompt.
+     * @param {number} dt  delta time (used to advance the glow pulse)
+     */
+    function renderStartScreen(dt) {
+      glowPhase += dt * 2.2;   // ~2.2 radians per second
+
+      var cx = canvas.width  / 2;
+      var cy = canvas.height / 2;
+
+      // ── Panel dimensions ──────────────────────────────────────
+      var panelW = Math.min(560, canvas.width  * 0.88);
+      var panelH = Math.min(480, canvas.height * 0.80);
+      var panelX = cx - panelW / 2;
+      var panelY = cy - panelH / 2;
+
+      // Semi-transparent background panel
+      ctx.save();
+      ctx.fillStyle   = 'rgba(0,5,30,0.78)';
+      ctx.strokeStyle = 'rgba(80,160,255,0.45)';
+      ctx.lineWidth   = 1.5;
+      drawRoundRect(panelX, panelY, panelW, panelH, 18);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      // ── Title: SPACE SHOOTER ──────────────────────────────────
+      var titleSize = clamp(Math.floor(canvas.width / 14), 36, 72);
+      ctx.save();
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font         = '900 ' + titleSize + 'px "Segoe UI", monospace';
+      ctx.shadowColor  = '#4af';
+      ctx.shadowBlur   = 32;
+      var tg = ctx.createLinearGradient(cx - 200, 0, cx + 200, 0);
+      tg.addColorStop(0,   '#a0d8ff');
+      tg.addColorStop(0.5, '#ffffff');
+      tg.addColorStop(1,   '#a0d8ff');
+      ctx.fillStyle = tg;
+      ctx.fillText('SPACE SHOOTER', cx, panelY + panelH * 0.17);
+      ctx.restore();
+
+      // ── Subtitle ──────────────────────────────────────────────
+      var subSize = clamp(Math.floor(canvas.width / 40), 12, 18);
+      ctx.save();
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font         = subSize + 'px "Segoe UI", monospace';
+      ctx.fillStyle    = 'rgba(140,200,255,0.85)';
+      ctx.fillText('Built for AI Game Hackathon', cx, panelY + panelH * 0.30);
+      ctx.restore();
+
+      // ── Divider ───────────────────────────────────────────────
+      ctx.save();
+      ctx.strokeStyle = 'rgba(80,140,220,0.40)';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.moveTo(panelX + 30,           panelY + panelH * 0.38);
+      ctx.lineTo(panelX + panelW - 30,  panelY + panelH * 0.38);
+      ctx.stroke();
+      ctx.restore();
+
+      // ── Controls list ─────────────────────────────────────────
+      var ctrlSize = clamp(Math.floor(canvas.width / 50), 11, 16);
+      var controls = [
+        { key: '←  →',  desc: 'Move Left / Right' },
+        { key: 'SPACE',  desc: 'Shoot'             },
+        { key: 'P',      desc: 'Pause'             }
+      ];
+
+      var ctrlStartY = panelY + panelH * 0.46;
+      var lineH      = ctrlSize * 2.6;
+      var badgeW     = 80;
+      var badgeH     = ctrlSize * 1.6;
+
+      for (var i = 0; i < controls.length; i++) {
+        var c  = controls[i];
+        var ky = ctrlStartY + i * lineH;
+
+        // Badge background
+        var bx = cx - 12 - badgeW;
+        ctx.save();
+        ctx.fillStyle   = 'rgba(30,80,160,0.60)';
+        ctx.strokeStyle = 'rgba(100,180,255,0.50)';
+        ctx.lineWidth   = 1;
+        drawRoundRect(bx, ky - badgeH / 2, badgeW, badgeH, 5);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+
+        // Key label
+        ctx.save();
+        ctx.font         = 'bold ' + ctrlSize + 'px "Courier New", monospace';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = '#e0f0ff';
+        ctx.shadowColor  = '#4af';
+        ctx.shadowBlur   = 6;
+        ctx.fillText(c.key, bx + badgeW / 2, ky);
+        ctx.restore();
+
+        // Description label
+        ctx.save();
+        ctx.font         = ctrlSize + 'px "Segoe UI", monospace';
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = 'rgba(180,220,255,0.85)';
+        ctx.fillText(c.desc, cx + 10, ky);
+        ctx.restore();
+      }
+
+      // ── "Press ENTER to Start" — pulsing glow ─────────────────
+      var pulse     = 0.55 + 0.45 * Math.sin(glowPhase);   // 0.10 … 1.00
+      var enterSize = clamp(Math.floor(canvas.width / 36), 14, 22);
+      ctx.save();
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font         = 'bold ' + enterSize + 'px "Segoe UI", monospace';
+      ctx.fillStyle    = 'rgba(100,220,255,' + pulse + ')';
+      ctx.shadowColor  = 'rgba(0,200,255,'   + pulse + ')';
+      ctx.shadowBlur   = 20 * pulse;
+      ctx.fillText('Press ENTER to Start', cx, panelY + panelH * 0.88);
+      ctx.restore();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  PLAYER SHIP
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * initShip — place the ship at the bottom-centre of the canvas.
+     * Called once when the game starts and again on resize.
+     */
+    function initShip() {
+      ship.x = canvas.width  / 2;
+      ship.y = canvas.height - 90;
+    }
+
+    /**
+     * updateShip — move the ship left/right with delta-time smoothing
+     * and clamp it inside the canvas edges.
+     * @param {number} dt  delta time in seconds
+     */
+    function updateShip(dt) {
+      // Advance the flame animation independently of movement
+      ship.flamePhase += dt * 8;   // ~8 rad/s flicker
+
+      if (keys['ArrowLeft']) {
+        ship.x -= ship.speed * dt;
+      }
+      if (keys['ArrowRight']) {
+        ship.x += ship.speed * dt;
+      }
+
+      // Clamp: keep the whole ship body on screen
+      ship.x = clamp(ship.x, ship.w, canvas.width - ship.w);
+    }
+
+    /**
+     * renderShip — draw the futuristic cyan/blue spaceship and its
+     * animated engine flame.  Everything is built from canvas primitives;
+     * no image assets are used.
+     *
+     * The ship is drawn in local space (origin = ship centre) then
+     * translated into world space via ctx.translate.
+     */
+    function renderShip() {
+      var x = ship.x;
+      var y = ship.y;
+
+      ctx.save();
+      ctx.translate(x, y);
+
+      // ── Engine flame (drawn first so the hull sits on top) ────
+      var flicker  = 0.75 + 0.25 * Math.sin(ship.flamePhase);          // 0.50 – 1.00
+      var flicker2 = 0.75 + 0.25 * Math.sin(ship.flamePhase * 1.3 + 1); // offset flicker
+
+      // Outer flame — wide, soft orange→transparent
+      var flameGrad = ctx.createRadialGradient(0, 28, 2, 0, 38, 22 * flicker);
+      flameGrad.addColorStop(0,   'rgba(255, 180,  60, 0.95)');
+      flameGrad.addColorStop(0.4, 'rgba(255,  80,   0, 0.70)');
+      flameGrad.addColorStop(1,   'rgba(255,  40,   0, 0.00)');
+      ctx.beginPath();
+      ctx.ellipse(0, 28 + 14 * flicker, 10, 22 * flicker, 0, 0, Math.PI * 2);
+      ctx.fillStyle = flameGrad;
+      ctx.fill();
+
+      // Inner flame core — bright white/yellow
+      var coreGrad = ctx.createRadialGradient(0, 26, 0, 0, 30, 8 * flicker2);
+      coreGrad.addColorStop(0,   'rgba(255, 255, 200, 1.00)');
+      coreGrad.addColorStop(0.5, 'rgba(255, 220,  80, 0.80)');
+      coreGrad.addColorStop(1,   'rgba(255, 120,   0, 0.00)');
+      ctx.beginPath();
+      ctx.ellipse(0, 28 + 6 * flicker2, 5, 10 * flicker2, 0, 0, Math.PI * 2);
+      ctx.fillStyle = coreGrad;
+      ctx.fill();
+
+      // ── Hull glow (soft bloom behind the ship) ────────────────
+      var hullGlow = ctx.createRadialGradient(0, 0, 10, 0, 0, 54);
+      hullGlow.addColorStop(0,   'rgba( 40, 180, 255, 0.18)');
+      hullGlow.addColorStop(1,   'rgba(  0,  80, 200, 0.00)');
+      ctx.beginPath();
+      ctx.arc(0, 0, 54, 0, Math.PI * 2);
+      ctx.fillStyle = hullGlow;
+      ctx.fill();
+
+      // ── Main body ─────────────────────────────────────────────
+      // Central fuselage — sleek tapered diamond shape
+      ctx.beginPath();
+      ctx.moveTo(  0, -52);   // nose tip
+      ctx.lineTo( 14, -16);   // right shoulder
+      ctx.lineTo( 16,  22);   // right waist
+      ctx.lineTo(  0,  30);   // tail centre
+      ctx.lineTo(-16,  22);   // left waist
+      ctx.lineTo(-14, -16);   // left shoulder
+      ctx.closePath();
+
+      var bodyGrad = ctx.createLinearGradient(-16, -52, 16, 30);
+      bodyGrad.addColorStop(0,   '#e8f8ff');
+      bodyGrad.addColorStop(0.3, '#60c8ff');
+      bodyGrad.addColorStop(0.7, '#0870c8');
+      bodyGrad.addColorStop(1,   '#003880');
+      ctx.fillStyle   = bodyGrad;
+      ctx.shadowColor = '#00cfff';
+      ctx.shadowBlur  = 18;
+      ctx.fill();
+
+      // Fuselage edge highlight
+      ctx.strokeStyle = 'rgba(160, 240, 255, 0.80)';
+      ctx.lineWidth   = 1.2;
+      ctx.stroke();
+
+      // ── Left wing ─────────────────────────────────────────────
+      ctx.beginPath();
+      ctx.moveTo(-14, -10);   // root front
+      ctx.lineTo(-46,  18);   // tip
+      ctx.lineTo(-38,  26);   // tip rear
+      ctx.lineTo(-16,  22);   // root rear
+      ctx.closePath();
+
+      var wingGradL = ctx.createLinearGradient(-46, 18, -14, -10);
+      wingGradL.addColorStop(0,   '#002860');
+      wingGradL.addColorStop(0.5, '#0858a8');
+      wingGradL.addColorStop(1,   '#40a8e0');
+      ctx.fillStyle   = wingGradL;
+      ctx.shadowColor = '#0090ff';
+      ctx.shadowBlur  = 10;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(80, 200, 255, 0.60)';
+      ctx.lineWidth   = 1;
+      ctx.stroke();
+
+      // ── Right wing (mirror) ───────────────────────────────────
+      ctx.beginPath();
+      ctx.moveTo( 14, -10);
+      ctx.lineTo( 46,  18);
+      ctx.lineTo( 38,  26);
+      ctx.lineTo( 16,  22);
+      ctx.closePath();
+
+      var wingGradR = ctx.createLinearGradient(46, 18, 14, -10);
+      wingGradR.addColorStop(0,   '#002860');
+      wingGradR.addColorStop(0.5, '#0858a8');
+      wingGradR.addColorStop(1,   '#40a8e0');
+      ctx.fillStyle   = wingGradR;
+      ctx.shadowColor = '#0090ff';
+      ctx.shadowBlur  = 10;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(80, 200, 255, 0.60)';
+      ctx.lineWidth   = 1;
+      ctx.stroke();
+
+      // ── Cockpit canopy ────────────────────────────────────────
+      ctx.beginPath();
+      ctx.ellipse(0, -22, 7, 14, 0, 0, Math.PI * 2);
+      var cockpitGrad = ctx.createRadialGradient(-2, -28, 1, 0, -22, 10);
+      cockpitGrad.addColorStop(0,   'rgba(220, 255, 255, 0.95)');
+      cockpitGrad.addColorStop(0.5, 'rgba( 80, 200, 255, 0.70)');
+      cockpitGrad.addColorStop(1,   'rgba(  0,  80, 160, 0.50)');
+      ctx.fillStyle   = cockpitGrad;
+      ctx.shadowColor = '#80ffff';
+      ctx.shadowBlur  = 12;
+      ctx.fill();
+
+      // ── Wing-tip accent lights ────────────────────────────────
+      // These pulse subtly with the flame phase
+      var tipGlow = 0.6 + 0.4 * Math.sin(ship.flamePhase * 0.7);
+      // Left tip
+      ctx.beginPath();
+      ctx.arc(-40, 20, 3, 0, Math.PI * 2);
+      ctx.fillStyle   = 'rgba(0, 255, 200,' + tipGlow + ')';
+      ctx.shadowColor = 'rgba(0, 255, 180, 0.9)';
+      ctx.shadowBlur  = 10;
+      ctx.fill();
+      // Right tip
+      ctx.beginPath();
+      ctx.arc(40, 20, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      // ── Centre spine detail line ──────────────────────────────
+      ctx.beginPath();
+      ctx.moveTo(0, -44);
+      ctx.lineTo(0,  22);
+      ctx.strokeStyle = 'rgba(200, 240, 255, 0.35)';
+      ctx.lineWidth   = 1;
+      ctx.shadowBlur  = 0;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  SHOOTING SYSTEM
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * spawnBullet — create one bullet at the ship's nose tip.
+     * The nose sits at (ship.x, ship.y - 52) in world space.
+     */
+    function spawnBullet() {
+      var noseX = ship.x;
+      var noseY = ship.y - 52;   // matches the nose vertex in renderShip
+
+      // Central bullet (always fired)
+      bullets.push({ x: noseX, y: noseY, speed: 820, vx: 0, w: 3, h: 14 });
+
+      // Triple shot: add two angled side bullets
+      if (activePowerUp === PU.TRIPLE) {
+        bullets.push({ x: noseX - 16, y: noseY + 10, speed: 820, vx: -60, w: 3, h: 14 });
+        bullets.push({ x: noseX + 16, y: noseY + 10, speed: 820, vx:  60, w: 3, h: 14 });
+      }
+
+      // Arm the muzzle flash at the nose position
+      muzzleFlash.active = true;
+      muzzleFlash.x      = noseX;
+      muzzleFlash.y      = noseY;
+      muzzleFlash.life   = muzzleFlash.duration;
+    }
+
+    /**
+     * updateBullets — move every bullet upward; cull those that have
+     * left the top of the screen.
+     * @param {number} dt  delta time in seconds
+     */
+    function updateBullets(dt) {
+      // Tick down the shoot cooldown
+      if (shootCooldown > 0) {
+        shootCooldown -= dt;
+      }
+
+      // Tick down the muzzle flash lifetime
+      if (muzzleFlash.active) {
+        muzzleFlash.life -= dt;
+        if (muzzleFlash.life <= 0) {
+          muzzleFlash.active = false;
+        }
+      }
+
+      // Move bullets and remove off-screen ones in a single pass
+      for (var i = bullets.length - 1; i >= 0; i--) {
+        bullets[i].y -= bullets[i].speed * dt;
+        if (bullets[i].vx) { bullets[i].x += bullets[i].vx * dt; }
+        if (bullets[i].y < -20 || bullets[i].x < -20 || bullets[i].x > canvas.width + 20) {
+          bullets.splice(i, 1);
+        }
+      }
+    }
+
+    /**
+     * renderBullets — draw every active bullet as a glowing cyan laser bolt,
+     * then draw the muzzle flash if it is active.
+     */
+    function renderBullets() {
+      var i, b;
+
+      for (i = 0; i < bullets.length; i++) {
+        b = bullets[i];
+        ctx.save();
+
+        // ── Outer glow halo ───────────────────────────────────
+        var halo = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, 10);
+        halo.addColorStop(0,   'rgba(0, 240, 255, 0.30)');
+        halo.addColorStop(1,   'rgba(0, 120, 255, 0.00)');
+        ctx.beginPath();
+        ctx.ellipse(b.x, b.y, 10, 18, 0, 0, Math.PI * 2);
+        ctx.fillStyle = halo;
+        ctx.fill();
+
+        // ── Laser bolt body — elongated bright core ───────────
+        var boltGrad = ctx.createLinearGradient(b.x, b.y - 14, b.x, b.y + 6);
+        boltGrad.addColorStop(0,   'rgba(200, 255, 255, 0.00)');  // fade at tip
+        boltGrad.addColorStop(0.2, 'rgba(120, 240, 255, 0.90)');
+        boltGrad.addColorStop(0.5, 'rgba(255, 255, 255, 1.00)');  // bright centre
+        boltGrad.addColorStop(0.8, 'rgba(  0, 200, 255, 0.85)');
+        boltGrad.addColorStop(1,   'rgba(  0,  80, 200, 0.00)');  // fade at tail
+
+        ctx.beginPath();
+        ctx.ellipse(b.x, b.y - 4, 2.5, 14, 0, 0, Math.PI * 2);
+        ctx.fillStyle   = boltGrad;
+        ctx.shadowColor = '#00eeff';
+        ctx.shadowBlur  = 12;
+        ctx.fill();
+
+        // ── Bright centre pixel ────────────────────────────────
+        ctx.beginPath();
+        ctx.ellipse(b.x, b.y - 4, 1, 5, 0, 0, Math.PI * 2);
+        ctx.fillStyle   = '#ffffff';
+        ctx.shadowColor = '#80ffff';
+        ctx.shadowBlur  = 8;
+        ctx.fill();
+
+        ctx.restore();
+      }
+
+      // ── Muzzle flash ──────────────────────────────────────────
+      if (muzzleFlash.active) {
+        // Normalise life: 1 at birth → 0 at death
+        var t  = muzzleFlash.life / muzzleFlash.duration;
+        var mx = muzzleFlash.x;
+        var my = muzzleFlash.y;
+
+        ctx.save();
+
+        // Expanding ring
+        var radius = 14 * (1 - t) + 4;
+        ctx.beginPath();
+        ctx.arc(mx, my, radius, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(0, 240, 255, ' + (t * 0.9) + ')';
+        ctx.lineWidth   = 2 * t;
+        ctx.shadowColor = '#00ffff';
+        ctx.shadowBlur  = 16 * t;
+        ctx.stroke();
+
+        // Central burst
+        var flashGrad = ctx.createRadialGradient(mx, my, 0, mx, my, 12 * t);
+        flashGrad.addColorStop(0,   'rgba(255, 255, 255, ' + t + ')');
+        flashGrad.addColorStop(0.4, 'rgba(  0, 240, 255, ' + (t * 0.8) + ')');
+        flashGrad.addColorStop(1,   'rgba(  0,  80, 255, 0.00)');
+        ctx.beginPath();
+        ctx.arc(mx, my, 12 * t, 0, Math.PI * 2);
+        ctx.fillStyle = flashGrad;
+        ctx.fill();
+
+        ctx.restore();
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  ENEMY SYSTEM
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * spawnEnemy — add one enemy at a random x position just above the
+     * top of the canvas.  Speed and size vary slightly per enemy to
+     * keep the wave feeling organic.
+     */
+    function spawnEnemy() {
+      var margin = 40;   // keep the full body on screen horizontally
+
+      // Difficulty scaling — each level adds a little speed, but we cap it
+      // so the game stays playable even at very high levels.
+      // Level 1 base: 60–120 px/s  |  cap: 180 px/s
+      var speedBoost = Math.min((level - 1) * 8, 120);
+      var baseMin    = 60  + speedBoost;
+      var baseMax    = 120 + speedBoost;
+
+      // Visual variant — purely cosmetic, no gameplay impact
+      var variants = ['scout', 'fighter', 'heavy'];
+
+      enemies.push({
+        x:          margin + Math.random() * (canvas.width - margin * 2),
+        y:          -40,
+        speed:      baseMin + Math.random() * (baseMax - baseMin),
+        scale:      0.85 + Math.random() * 0.30,
+        glowPhase:  Math.random() * Math.PI * 2,
+        w:          34,
+        h:          30,
+        variant:    variants[Math.floor(Math.random() * variants.length)]
+      });
+    }
+
+    /**
+     * updateEnemies — tick the spawn timer, move enemies downward,
+     * and cull any that have passed the bottom of the screen.
+     * @param {number} dt  delta time in seconds
+     */
+    function updateEnemies(dt) {
+      // ── Spawn timer ───────────────────────────────────────────
+      enemySpawnTimer -= dt;
+      if (enemySpawnTimer <= 0) {
+        spawnEnemy();
+        enemySpawnTimer = nextSpawnInterval();
+      }
+
+      // ── Move + advance glow phase ─────────────────────────────
+      // (Bottom-of-screen removal is handled by checkCollisions)
+      for (var i = enemies.length - 1; i >= 0; i--) {
+        enemies[i].y          += enemies[i].speed * dt;
+        enemies[i].glowPhase  += dt * 3.5;   // pulse the glow
+      }
+    }
+
+    // ── Enemy visual helpers (pure draw, local-space, no logic) ──
+
+    /**
+     * drawScoutEnemy — small cyan UFO, sleek narrow body, blue glow.
+     * Drawn in local space with origin at enemy centre.
+     * @param {number} pulse  0.2–1.0 pulsing brightness value
+     * @param {number} tipA   0.0–1.0 tip-light alpha
+     */
+    function drawScoutEnemy(pulse, tipA) {
+      // 1. Outer cyan ambient glow
+      var og = ctx.createRadialGradient(0, 0, 6, 0, 0, 46);
+      og.addColorStop(0,   'rgba( 40, 200, 255, ' + (0.28 * pulse) + ')');
+      og.addColorStop(0.5, 'rgba(  0, 120, 220, ' + (0.14 * pulse) + ')');
+      og.addColorStop(1,   'rgba(  0,  60, 180, 0.00)');
+      ctx.beginPath(); ctx.arc(0, 0, 46, 0, Math.PI * 2);
+      ctx.fillStyle = og; ctx.fill();
+
+      // 2. Narrow swept fins
+      var fins = [[-1], [1]];
+      for (var fi = 0; fi < fins.length; fi++) {
+        var sx = fins[fi][0];
+        ctx.beginPath();
+        ctx.moveTo(sx *  8,  6);
+        ctx.lineTo(sx * 30, 16);
+        ctx.lineTo(sx * 24, 22);
+        ctx.lineTo(sx *  6, 13);
+        ctx.closePath();
+        var fg = ctx.createLinearGradient(sx * 30, 16, sx * 6, 6);
+        fg.addColorStop(0,   '#001830');
+        fg.addColorStop(0.5, '#004880');
+        fg.addColorStop(1,   '#0090cc');
+        ctx.fillStyle   = fg;
+        ctx.shadowColor = '#00aaff';
+        ctx.shadowBlur  = 6;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0, 180, 255, 0.55)';
+        ctx.lineWidth   = 0.7;
+        ctx.stroke();
+      }
+
+      // 3. Slim saucer hull
+      ctx.beginPath();
+      ctx.ellipse(0, 3, 28, 11, 0, 0, Math.PI * 2);
+      var hg = ctx.createLinearGradient(0, -8, 0, 14);
+      hg.addColorStop(0,   '#60d8ff');
+      hg.addColorStop(0.4, '#0090cc');
+      hg.addColorStop(0.8, '#004878');
+      hg.addColorStop(1,   '#001830');
+      ctx.fillStyle   = hg;
+      ctx.shadowColor = '#00ccff';
+      ctx.shadowBlur  = 14 * pulse;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(120, 230, 255, 0.80)';
+      ctx.lineWidth   = 0.9;
+      ctx.stroke();
+
+      // 4. Dome
+      ctx.beginPath();
+      ctx.ellipse(0, -4, 9, 8, 0, 0, Math.PI * 2);
+      var dg = ctx.createRadialGradient(-2, -7, 1, 0, -4, 11);
+      dg.addColorStop(0,   'rgba(200, 240, 255, 0.95)');
+      dg.addColorStop(0.4, 'rgba( 40, 180, 255, 0.80)');
+      dg.addColorStop(1,   'rgba(  0,  60, 140, 0.50)');
+      ctx.fillStyle   = dg;
+      ctx.shadowColor = '#80eeff';
+      ctx.shadowBlur  = 10;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(160, 230, 255, 0.70)';
+      ctx.lineWidth   = 0.7;
+      ctx.stroke();
+
+      // 5. Engine ring
+      var ra = 0.4 + 0.55 * pulse;
+      ctx.beginPath();
+      ctx.ellipse(0, 8, 16, 5, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0, 200, 255, ' + ra + ')';
+      ctx.lineWidth   = 2;
+      ctx.shadowColor = '#00ccff';
+      ctx.shadowBlur  = 14 * pulse;
+      ctx.stroke();
+
+      // 6. Tip lights (cyan)
+      ctx.beginPath(); ctx.arc(-28, 18, 2, 0, Math.PI * 2);
+      ctx.fillStyle   = 'rgba(0, 220, 255, ' + tipA + ')';
+      ctx.shadowColor = '#00ddff'; ctx.shadowBlur = 8;
+      ctx.fill();
+      ctx.beginPath(); ctx.arc( 28, 18, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    /**
+     * drawFighterEnemy — medium orange/amber UFO, wider wings, brighter lights.
+     * Drawn in local space with origin at enemy centre.
+     */
+    function drawFighterEnemy(pulse, tipA) {
+      // 1. Outer orange ambient glow
+      var og = ctx.createRadialGradient(0, 0, 8, 0, 0, 50);
+      og.addColorStop(0,   'rgba(255, 140,  20, ' + (0.26 * pulse) + ')');
+      og.addColorStop(0.5, 'rgba(200,  80,   0, ' + (0.13 * pulse) + ')');
+      og.addColorStop(1,   'rgba(160,  40,   0, 0.00)');
+      ctx.beginPath(); ctx.arc(0, 0, 50, 0, Math.PI * 2);
+      ctx.fillStyle = og; ctx.fill();
+
+      // 2. Wider swept fins with angular tip
+      var fins = [[-1], [1]];
+      for (var fi = 0; fi < fins.length; fi++) {
+        var sx = fins[fi][0];
+        ctx.beginPath();
+        ctx.moveTo(sx * 12,  6);
+        ctx.lineTo(sx * 40, 14);
+        ctx.lineTo(sx * 44, 22);  // angled tip
+        ctx.lineTo(sx * 34, 26);
+        ctx.lineTo(sx *  8, 16);
+        ctx.closePath();
+        var fg = ctx.createLinearGradient(sx * 40, 14, sx * 8, 6);
+        fg.addColorStop(0,   '#1c0600');
+        fg.addColorStop(0.5, '#7a2800');
+        fg.addColorStop(1,   '#dd5500');
+        ctx.fillStyle   = fg;
+        ctx.shadowColor = '#ff7700';
+        ctx.shadowBlur  = 9;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 140, 0, 0.55)';
+        ctx.lineWidth   = 0.9;
+        ctx.stroke();
+      }
+
+      // 3. Medium hull — slightly wider than scout
+      ctx.beginPath();
+      ctx.ellipse(0, 4, 34, 14, 0, 0, Math.PI * 2);
+      var hg = ctx.createLinearGradient(0, -10, 0, 18);
+      hg.addColorStop(0,   '#ffaa40');
+      hg.addColorStop(0.4, '#cc5500');
+      hg.addColorStop(0.8, '#7a2400');
+      hg.addColorStop(1,   '#280800');
+      ctx.fillStyle   = hg;
+      ctx.shadowColor = '#ff8800';
+      ctx.shadowBlur  = 16 * pulse;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 180, 60, 0.80)';
+      ctx.lineWidth   = 1;
+      ctx.stroke();
+
+      // 4. Panel stripe
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,120,0,0.28)';
+      ctx.lineWidth   = 0.7;
+      ctx.beginPath(); ctx.ellipse(0, 4, 34, 4, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+
+      // 5. Dome — amber tint
+      ctx.beginPath();
+      ctx.ellipse(0, -4, 11, 9, 0, 0, Math.PI * 2);
+      var dg = ctx.createRadialGradient(-2, -7, 1, 0, -4, 13);
+      dg.addColorStop(0,   'rgba(255, 230, 180, 0.95)');
+      dg.addColorStop(0.4, 'rgba(220, 120,  30, 0.85)');
+      dg.addColorStop(1,   'rgba( 80,  20,   0, 0.55)');
+      ctx.fillStyle   = dg;
+      ctx.shadowColor = '#ffcc44';
+      ctx.shadowBlur  = 12;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 200, 80, 0.70)';
+      ctx.lineWidth   = 0.8;
+      ctx.stroke();
+
+      // 6. Double engine ring for fighter look
+      var ra = 0.4 + 0.55 * pulse;
+      ctx.beginPath();
+      ctx.ellipse(0, 10, 22, 6, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255, 140, 0, ' + ra + ')';
+      ctx.lineWidth   = 2.5;
+      ctx.shadowColor = '#ff8800';
+      ctx.shadowBlur  = 18 * pulse;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(0, 10, 11, 3, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255, 220, 80, ' + (ra * 0.85) + ')';
+      ctx.lineWidth   = 1.5;
+      ctx.shadowBlur  = 10 * pulse;
+      ctx.stroke();
+
+      // 7. Brighter tip lights (amber)
+      ctx.beginPath(); ctx.arc(-38, 20, 3, 0, Math.PI * 2);
+      ctx.fillStyle   = 'rgba(255, 160, 0, ' + tipA + ')';
+      ctx.shadowColor = '#ffaa00'; ctx.shadowBlur = 12;
+      ctx.fill();
+      ctx.beginPath(); ctx.arc( 38, 20, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    /**
+     * drawHeavyEnemy — larger red UFO, thick fins, intense glow, triple rings.
+     * Drawn in local space with origin at enemy centre.
+     */
+    function drawHeavyEnemy(pulse, tipA) {
+      // 1. Strong red ambient glow
+      var og = ctx.createRadialGradient(0, 0, 10, 0, 0, 56);
+      og.addColorStop(0,   'rgba(255,  40,   0, ' + (0.32 * pulse) + ')');
+      og.addColorStop(0.5, 'rgba(200,   0,   0, ' + (0.18 * pulse) + ')');
+      og.addColorStop(1,   'rgba(160,   0,   0, 0.00)');
+      ctx.beginPath(); ctx.arc(0, 0, 56, 0, Math.PI * 2);
+      ctx.fillStyle = og; ctx.fill();
+
+      // 2. Thick blunt fins
+      var fins = [[-1], [1]];
+      for (var fi = 0; fi < fins.length; fi++) {
+        var sx = fins[fi][0];
+        ctx.beginPath();
+        ctx.moveTo(sx * 14,  4);
+        ctx.lineTo(sx * 42, 16);
+        ctx.lineTo(sx * 38, 30);
+        ctx.lineTo(sx * 10, 20);
+        ctx.closePath();
+        var fg = ctx.createLinearGradient(sx * 42, 16, sx * 10, 4);
+        fg.addColorStop(0,   '#1a0000');
+        fg.addColorStop(0.5, '#880000');
+        fg.addColorStop(1,   '#cc1800');
+        ctx.fillStyle   = fg;
+        ctx.shadowColor = '#ff2200';
+        ctx.shadowBlur  = 12;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 60, 0, 0.60)';
+        ctx.lineWidth   = 1.0;
+        ctx.stroke();
+      }
+
+      // 3. Wide heavy hull
+      ctx.beginPath();
+      ctx.ellipse(0, 5, 36, 17, 0, 0, Math.PI * 2);
+      var hg = ctx.createLinearGradient(0, -12, 0, 22);
+      hg.addColorStop(0,   '#ff5030');
+      hg.addColorStop(0.4, '#cc1800');
+      hg.addColorStop(0.8, '#880000');
+      hg.addColorStop(1,   '#2a0000');
+      ctx.fillStyle   = hg;
+      ctx.shadowColor = '#ff2200';
+      ctx.shadowBlur  = 22 * pulse;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 100, 40, 0.85)';
+      ctx.lineWidth   = 1.2;
+      ctx.stroke();
+
+      // 4. Two panel stripes (more detail = heavier feel)
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 60, 0, 0.25)';
+      ctx.lineWidth   = 0.7;
+      ctx.beginPath(); ctx.ellipse(0, 5, 36, 6, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(0, 5, 20, 10, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+
+      // 5. Dome — deep red tint, glowing
+      ctx.beginPath();
+      ctx.ellipse(0, -5, 13, 11, 0, 0, Math.PI * 2);
+      var dg = ctx.createRadialGradient(-3, -9, 1, 0, -5, 15);
+      dg.addColorStop(0,   'rgba(255, 160, 140, 0.95)');
+      dg.addColorStop(0.4, 'rgba(220,  50,  20, 0.90)');
+      dg.addColorStop(1,   'rgba( 80,   0,   0, 0.65)');
+      ctx.fillStyle   = dg;
+      ctx.shadowColor = '#ff6644';
+      ctx.shadowBlur  = 16;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 120, 60, 0.75)';
+      ctx.lineWidth   = 0.9;
+      ctx.stroke();
+
+      // 6. Triple engine rings — heavy firepower look
+      var ra = 0.45 + 0.50 * pulse;
+      [-14, 0, 14].forEach(function(ox) {
+        ctx.beginPath();
+        ctx.ellipse(ox, 12, 8, 4, 0, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255, 80, 0, ' + ra + ')';
+        ctx.lineWidth   = 2.2;
+        ctx.shadowColor = '#ff4400';
+        ctx.shadowBlur  = 16 * pulse;
+        ctx.stroke();
+      });
+
+      // 7. Large pulsing tip lights (red)
+      ctx.beginPath(); ctx.arc(-40, 24, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle   = 'rgba(255, 40, 0, ' + tipA + ')';
+      ctx.shadowColor = '#ff2200'; ctx.shadowBlur = 14;
+      ctx.fill();
+      ctx.beginPath(); ctx.arc( 40, 24, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    /**
+     * renderEnemies — dispatch each enemy to its variant draw helper.
+     * All transform setup and teardown stays here; helpers draw in local space.
+     */
+    function renderEnemies() {
+      for (var i = 0; i < enemies.length; i++) {
+        var e     = enemies[i];
+        var pulse = 0.6 + 0.4 * Math.sin(e.glowPhase);
+        var tipA  = 0.5 + 0.5 * Math.sin(e.glowPhase * 1.4);
+
+        ctx.save();
+        ctx.translate(e.x, e.y);
+        ctx.scale(e.scale, e.scale);
+
+        if (e.variant === 'scout') {
+          drawScoutEnemy(pulse, tipA);
+        } else if (e.variant === 'fighter') {
+          drawFighterEnemy(pulse, tipA);
+        } else {
+          drawHeavyEnemy(pulse, tipA);
+        }
+
+        ctx.restore();
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  WEB AUDIO  —  procedural sound effects (no external files)
+    // ═══════════════════════════════════════════════════════════════
+
+    // AudioContext is created lazily on first use so browsers that
+    // require a user gesture before audio don't throw errors.
+    var audioCtx = null;
+
+    function getAudioCtx() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      return audioCtx;
+    }
+
+    // ── Background music ─────────────────────────────────────────
+    // Using a plain HTMLAudioElement so looping + pause/resume are trivial
+    // and the file can be served directly from the filesystem (file://).
+    var bgm = (function () {
+      var el = new Audio('assets/audio/bgm.mp3');
+      el.loop   = true;
+      el.volume = 0.35;
+      return el;
+    }());
+
+    // Tracks whether the player has started a game session yet.
+    // We only begin playback after ENTER is pressed the first time,
+    // satisfying browser autoplay policies (requires a user gesture).
+    var bgmStarted = false;
+
+    /**
+     * bgmPlay — start or resume BGM.
+     * Silently handles the NotAllowedError that browsers throw when
+     * autoplay is blocked; the music will begin on the next user gesture.
+     */
+    function bgmPlay() {
+      if (bgm.paused) {
+        var p = bgm.play();
+        // play() returns a Promise in modern browsers
+        if (p && typeof p.catch === 'function') {
+          p.catch(function () { /* autoplay blocked — will retry on next gesture */ });
+        }
+      }
+    }
+
+    /**
+     * bgmPause — pause BGM without resetting position.
+     */
+    function bgmPause() {
+      if (!bgm.paused) { bgm.pause(); }
+    }
+
+    /**
+     * bgmStop — pause and rewind to the start (used on hard reset).
+     */
+    function bgmStop() {
+      bgm.pause();
+      bgm.currentTime = 0;
+    }
+
+    /**
+     * playExplosionSound — short orange-noise burst for enemy kill.
+     * Envelope: sharp attack, quick exponential decay (~0.25 s).
+     */
+    function playExplosionSound() {
+      try {
+        var ac  = getAudioCtx();
+        var buf = ac.createBuffer(1, ac.sampleRate * 0.25, ac.sampleRate);
+        var dat = buf.getChannelData(0);
+        for (var i = 0; i < dat.length; i++) {
+          // White noise * exponential decay
+          dat[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / dat.length, 2);
+        }
+        var src  = ac.createBufferSource();
+        src.buffer = buf;
+
+        // Band-pass to give it a punchy mid-frequency pop
+        var bpf       = ac.createBiquadFilter();
+        bpf.type      = 'bandpass';
+        bpf.frequency.value = 280;
+        bpf.Q.value   = 0.8;
+
+        var gain      = ac.createGain();
+        gain.gain.setValueAtTime(0.55, ac.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.25);
+
+        src.connect(bpf);
+        bpf.connect(gain);
+        gain.connect(ac.destination);
+        src.start();
+      } catch (e) { /* silently ignore if audio is blocked */ }
+    }
+
+    /**
+     * playWarningSound — low descending tone when an enemy reaches the bottom.
+     * Two sine oscillators detuned slightly for a harsh buzz.
+     */
+    function playWarningSound() {
+      try {
+        var ac   = getAudioCtx();
+        var gain = ac.createGain();
+        gain.gain.setValueAtTime(0.40, ac.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.35);
+        gain.connect(ac.destination);
+
+        [180, 185].forEach(function (freq) {
+          var osc  = ac.createOscillator();
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(freq, ac.currentTime);
+          osc.frequency.exponentialRampToValueAtTime(60, ac.currentTime + 0.35);
+          osc.connect(gain);
+          osc.start();
+          osc.stop(ac.currentTime + 0.35);
+        });
+      } catch (e) { /* silently ignore */ }
+    }
+
+    /**
+     * playPickupSound — bright, snappy two-tone chime for collecting a power-up.
+     * A short sine sweep up followed by a higher harmonic ping.
+     */
+    function playPickupSound() {
+      try {
+        var ac = getAudioCtx();
+        // Sweep tone
+        var osc1  = ac.createOscillator();
+        var gain1 = ac.createGain();
+        osc1.type = 'sine';
+        osc1.frequency.setValueAtTime(520, ac.currentTime);
+        osc1.frequency.exponentialRampToValueAtTime(880, ac.currentTime + 0.12);
+        gain1.gain.setValueAtTime(0.28, ac.currentTime);
+        gain1.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.18);
+        osc1.connect(gain1); gain1.connect(ac.destination);
+        osc1.start(); osc1.stop(ac.currentTime + 0.18);
+
+        // Harmonic ping at 1320 Hz (after 100 ms)
+        var osc2  = ac.createOscillator();
+        var gain2 = ac.createGain();
+        osc2.type = 'triangle';
+        osc2.frequency.value = 1320;
+        gain2.gain.setValueAtTime(0, ac.currentTime + 0.10);
+        gain2.gain.linearRampToValueAtTime(0.22, ac.currentTime + 0.13);
+        gain2.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.38);
+        osc2.connect(gain2); gain2.connect(ac.destination);
+        osc2.start(ac.currentTime + 0.10);
+        osc2.stop(ac.currentTime + 0.40);
+      } catch (e) { /* silently ignore */ }
+    }
+
+    /**
+     * playLevelUpSound — satisfying ascending arpeggio to celebrate a level-up.
+     * Three sine tones fire in quick sequence, each higher than the last.
+     */
+    function playLevelUpSound() {
+      try {
+        var ac     = getAudioCtx();
+        var notes  = [440, 554, 659, 880];   // A4 C#5 E5 A5 — A major arpeggio
+        var delay  = 0;
+
+        notes.forEach(function (freq) {
+          var osc  = ac.createOscillator();
+          var gain = ac.createGain();
+
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+
+          gain.gain.setValueAtTime(0, ac.currentTime + delay);
+          gain.gain.linearRampToValueAtTime(0.30, ac.currentTime + delay + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + delay + 0.28);
+
+          osc.connect(gain);
+          gain.connect(ac.destination);
+          osc.start(ac.currentTime + delay);
+          osc.stop(ac.currentTime + delay + 0.30);
+
+          delay += 0.10;   // stagger each note by 100 ms
+        });
+      } catch (e) { /* silently ignore */ }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  EXPLOSION PARTICLES
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * spawnExplosion — burst N particles from position (x, y).
+     * Each particle has a random velocity, lifetime, and colour
+     * picked from an orange/red/yellow palette.
+     */
+    function spawnExplosion(x, y) {
+      var colours = ['#ff8800', '#ff4400', '#ffcc00', '#ff2200', '#ffaa44'];
+      var count   = 18 + Math.floor(Math.random() * 10);   // 18–27 particles
+      for (var i = 0; i < count; i++) {
+        var angle  = Math.random() * Math.PI * 2;
+        var speed  = 60 + Math.random() * 180;
+        particles.push({
+          x:      x,
+          y:      y,
+          vx:     Math.cos(angle) * speed,
+          vy:     Math.sin(angle) * speed,
+          life:   0.45 + Math.random() * 0.35,   // 0.45–0.80 s
+          maxLife: 0,   // set below
+          size:   2 + Math.random() * 4,
+          colour: colours[Math.floor(Math.random() * colours.length)]
+        });
+        particles[particles.length - 1].maxLife = particles[particles.length - 1].life;
+      }
+    }
+
+    /**
+     * updateParticles — move particles, apply drag, tick lifetime, cull dead ones.
+     * @param {number} dt  delta time in seconds
+     */
+    function updateParticles(dt) {
+      for (var i = particles.length - 1; i >= 0; i--) {
+        var p  = particles[i];
+        p.x   += p.vx * dt;
+        p.y   += p.vy * dt;
+        p.vx  *= (1 - 4 * dt);   // drag
+        p.vy  *= (1 - 4 * dt);
+        p.life -= dt;
+        if (p.life <= 0) { particles.splice(i, 1); }
+      }
+    }
+
+    /**
+     * renderParticles — draw each particle as a glowing dot that fades out.
+     */
+    function renderParticles() {
+      for (var i = 0; i < particles.length; i++) {
+        var p     = particles[i];
+        var alpha = p.life / p.maxLife;   // 1 → 0 over lifetime
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * alpha + 0.5, 0, Math.PI * 2);
+        ctx.fillStyle   = p.colour;
+        ctx.shadowColor = p.colour;
+        ctx.shadowBlur  = 8 * alpha;
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  COLLISION & GAMEPLAY
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * checkCollisions — AABB test between every bullet and every enemy.
+     * On hit: remove both, spawn explosion, play sound, add score.
+     * Enemies that reached the bottom lose a life instead.
+     */
+    function checkCollisions() {
+      // ── Bullet ↔ Enemy ────────────────────────────────────────
+      for (var bi = bullets.length - 1; bi >= 0; bi--) {
+        var b = bullets[bi];
+        for (var ei = enemies.length - 1; ei >= 0; ei--) {
+          var e  = enemies[ei];
+          var hw = e.w * e.scale;   // scaled half-widths
+          var hh = e.h * e.scale;
+          if (b.x > e.x - hw && b.x < e.x + hw &&
+              b.y > e.y - hh && b.y < e.y + hh) {
+            // Hit!
+            spawnExplosion(e.x, e.y);
+            playExplosionSound();
+            score += 10;
+            checkLevelUp();
+            enemies.splice(ei, 1);
+            bullets.splice(bi, 1);
+            break;   // this bullet is gone — stop checking enemies
+          }
+        }
+      }
+
+      // ── Enemy reaches bottom → lose a life ───────────────────
+      for (var i = enemies.length - 1; i >= 0; i--) {
+        if (enemies[i].y > canvas.height + 60) {
+          enemies.splice(i, 1);
+          if (shieldActive) {
+            shieldActive  = false;
+            activePowerUp = null;
+            spawnPuText(ship.x, ship.y - 60, 'SHIELD BLOCKED!', '#88ff44');
+          } else {
+            lives -= 1;
+            playWarningSound();
+            if (lives <= 0) { lives = 0; gameState = STATE.GAMEOVER; }
+          }
+        }
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  HUD  —  score (top-left) and lives (top-right)
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * renderHUD — draws the score and life indicators every PLAYING frame.
+     */
+    function renderHUD() {
+      var pad  = 18;
+      var size = clamp(Math.floor(canvas.width / 45), 14, 22);
+
+      ctx.save();
+      ctx.font         = 'bold ' + size + 'px "Segoe UI", monospace';
+      ctx.textBaseline = 'top';
+
+      // ── Score (top-left) ──────────────────────────────────────
+      ctx.textAlign    = 'left';
+      ctx.fillStyle    = 'rgba(160, 240, 255, 0.90)';
+      ctx.shadowColor  = '#00cfff';
+      ctx.shadowBlur   = 10;
+      ctx.fillText('SCORE  ' + score, pad, pad);
+
+      // ── Level (top-center) ────────────────────────────────────
+      ctx.textAlign    = 'center';
+      ctx.fillStyle    = 'rgba(80, 255, 200, 0.90)';
+      ctx.shadowColor  = '#00ffcc';
+      ctx.shadowBlur   = 12;
+      ctx.fillText('LEVEL  ' + level, canvas.width / 2, pad);
+
+      // ── Lives — draw small heart icons (top-right) ────────────
+      ctx.textAlign    = 'right';
+      ctx.shadowBlur   = 0;
+
+      // Label
+      ctx.fillStyle = 'rgba(160, 240, 255, 0.90)';
+      ctx.fillText('LIVES', canvas.width - pad - (size * 1.1 + 6) * MAX_LIVES, pad);
+
+      // Heart icons
+      for (var li = 0; li < MAX_LIVES; li++) {
+        var hx = canvas.width - pad - (size * 1.1) * (MAX_LIVES - li);
+        var hy = pad;
+        var filled = li < lives;
+        ctx.font         = size + 'px "Segoe UI", monospace';
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle    = filled ? '#ff4466' : 'rgba(100,50,60,0.50)';
+        ctx.shadowColor  = filled ? '#ff2244' : 'transparent';
+        ctx.shadowBlur   = filled ? 8 : 0;
+        ctx.fillText('♥', hx, hy);
+      }
+
+      ctx.restore();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  GAME OVER SCREEN
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * renderGameOver — centred panel with GAME OVER title, final score,
+     * and a pulsing "Press ENTER to Restart" prompt.
+     * @param {number} dt  delta time for animating the prompt glow
+     */
+    function renderGameOver(dt) {
+      gameOverGlowPhase += dt * 2.2;
+
+      var cx = canvas.width  / 2;
+      var cy = canvas.height / 2;
+
+      var panelW = Math.min(480, canvas.width  * 0.85);
+      var panelH = Math.min(340, canvas.height * 0.65);
+      var panelX = cx - panelW / 2;
+      var panelY = cy - panelH / 2;
+
+      // ── Panel background ──────────────────────────────────────
+      ctx.save();
+      ctx.fillStyle   = 'rgba(20,0,0,0.88)';
+      ctx.strokeStyle = 'rgba(255,60,0,0.55)';
+      ctx.lineWidth   = 1.5;
+      drawRoundRect(panelX, panelY, panelW, panelH, 18);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      // ── "GAME OVER" title ────────────────────────────────────
+      var titleSize = clamp(Math.floor(canvas.width / 12), 38, 72);
+      ctx.save();
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font         = '900 ' + titleSize + 'px "Segoe UI", monospace';
+      var rg = ctx.createLinearGradient(cx - 180, 0, cx + 180, 0);
+      rg.addColorStop(0,   '#ff8844');
+      rg.addColorStop(0.5, '#ffffff');
+      rg.addColorStop(1,   '#ff4400');
+      ctx.fillStyle   = rg;
+      ctx.shadowColor = '#ff3300';
+      ctx.shadowBlur  = 28;
+      ctx.fillText('GAME OVER', cx, panelY + panelH * 0.27);
+      ctx.restore();
+
+      // ── Final score ───────────────────────────────────────────
+      var scoreSize = clamp(Math.floor(canvas.width / 32), 16, 26);
+      ctx.save();
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font         = scoreSize + 'px "Segoe UI", monospace';
+      ctx.fillStyle    = 'rgba(255, 200, 140, 0.90)';
+      ctx.shadowColor  = '#ff6600';
+      ctx.shadowBlur   = 10;
+      ctx.fillText('Final Score:  ' + score, cx, panelY + panelH * 0.53);
+      ctx.restore();
+
+      // ── Pulsing restart prompt ────────────────────────────────
+      var pulse     = 0.55 + 0.45 * Math.sin(gameOverGlowPhase);
+      var enterSize = clamp(Math.floor(canvas.width / 38), 13, 20);
+      ctx.save();
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font         = 'bold ' + enterSize + 'px "Segoe UI", monospace';
+      ctx.fillStyle    = 'rgba(255, 160, 60,' + pulse + ')';
+      ctx.shadowColor  = 'rgba(255, 100, 0,' + pulse + ')';
+      ctx.shadowBlur   = 18 * pulse;
+      ctx.fillText('Press ENTER to Restart', cx, panelY + panelH * 0.80);
+      ctx.restore();
+    }
+
+    /**
+     * resetGame — wipe all dynamic state back to starting values.
+     * Called when ENTER is pressed on the Game Over screen.
+     */
+    function resetGame() {
+      score              = 0;
+      lives              = MAX_LIVES;
+      level              = 1;
+      levelUpTimer       = 0;
+      shakeTimer         = 0;
+      bullets            = [];
+      enemies            = [];
+      particles          = [];
+      boss               = null;
+      bossBullets        = [];
+      bossSpawnTimer     = BOSS_SPAWN_TIME;
+      bossScoreTriggered = false;
+      bossCountdownActive = false;
+      bossCountdownValue  = 0;
+      bossCountdownFrac   = 0;
+      bossWarningActive   = false;
+      bossWarningTimer    = 0;
+      deathFlash.active  = false;
+      deathFlash.life    = 0;
+      powerUps           = [];
+      puTexts            = [];
+      puSpawnTimer       = 8;
+      activePowerUp      = null;
+      powerUpTimer       = 0;
+      shieldActive       = false;
+      shootCooldown      = 0;
+      muzzleFlash.active = false;
+      enemySpawnTimer    = nextSpawnInterval();
+      gameOverGlowPhase  = 0;
+      initShip();
+      bgmStop();   // rewind track; caller (input) calls bgmPlay() right after
+      gameState = STATE.PLAYING;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  LEVEL PROGRESSION
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * checkLevelUp — called every frame after score changes.
+     * Computes the expected level from the current score; if it has
+     * risen, triggers the banner, camera shake, and level-up sound.
+     */
+    function checkLevelUp() {
+      var newLevel = Math.floor(score / SCORE_PER_LEVEL) + 1;
+      if (newLevel > level) {
+        level          = newLevel;
+        levelUpTimer   = LEVEL_UP_DURATION;
+        shakeTimer     = SHAKE_DURATION;
+        playLevelUpSound();
+      }
+    }
+
+    /**
+     * updateLevelEffects — tick the banner and shake timers down.
+     * @param {number} dt  delta time in seconds
+     */
+    function updateLevelEffects(dt) {
+      if (levelUpTimer > 0) { levelUpTimer -= dt; }
+      if (shakeTimer   > 0) { shakeTimer   -= dt; }
+    }
+
+    /**
+     * applyCameraShake — if a shake is active, translate the canvas by a
+     * random offset proportional to the remaining shake time.
+     * Call ctx.save() before and ctx.restore() after all drawing.
+     * Returns true if shake was applied (so caller knows to restore).
+     */
+    function applyCameraShake() {
+      if (shakeTimer <= 0) return false;
+      var intensity = (shakeTimer / SHAKE_DURATION) * SHAKE_MAGNITUDE;
+      var sx = (Math.random() * 2 - 1) * intensity;
+      var sy = (Math.random() * 2 - 1) * intensity;
+      ctx.save();
+      ctx.translate(sx, sy);
+      return true;
+    }
+
+    /**
+     * renderLevelUpBanner — draws the centred "LEVEL UP!" overlay while
+     * levelUpTimer > 0.  The text scales up then fades out smoothly.
+     */
+    function renderLevelUpBanner() {
+      if (levelUpTimer <= 0) return;
+
+      var cx = canvas.width  / 2;
+      var cy = canvas.height / 2;
+
+      // Normalised progress: 1 at start → 0 when timer expires
+      var t = levelUpTimer / LEVEL_UP_DURATION;
+
+      // Animation curve:
+      //   0.0–0.15  → pop in  (scale 0.4 → 1.0)
+      //   0.15–0.70 → hold
+      //   0.70–1.0  → fade out (alpha 1 → 0)  [t goes 0.30 → 0]
+      var scaleT  = clamp((1 - t) / 0.15, 0, 1);           // 0→1 during pop-in
+      var scale   = 0.4 + 0.6 * scaleT;                     // 0.4 → 1.0
+      var alpha   = t < 0.30 ? (t / 0.30) : 1.0;           // fade out in last 30%
+
+      var fontSize = clamp(Math.floor(canvas.width / 10), 42, 88);
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(cx, cy - 40);
+      ctx.scale(scale, scale);
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+
+      // Outer glow pass
+      ctx.font         = '900 ' + fontSize + 'px "Segoe UI", monospace';
+      ctx.shadowColor  = '#00ffcc';
+      ctx.shadowBlur   = 40;
+      ctx.fillStyle    = 'rgba(0,255,180,0.25)';
+      ctx.fillText('LEVEL UP!', 0, 0);
+
+      // Main text — cyan-to-white gradient
+      var grad = ctx.createLinearGradient(-200, 0, 200, 0);
+      grad.addColorStop(0,   '#40ffdd');
+      grad.addColorStop(0.5, '#ffffff');
+      grad.addColorStop(1,   '#40ccff');
+      ctx.fillStyle   = grad;
+      ctx.shadowColor = '#00ffee';
+      ctx.shadowBlur  = 20;
+      ctx.fillText('LEVEL UP!', 0, 0);
+
+      // Sub-label: new level number
+      var subSize = clamp(Math.floor(canvas.width / 28), 18, 32);
+      ctx.font         = subSize + 'px "Segoe UI", monospace';
+      ctx.fillStyle    = 'rgba(160, 255, 240, 0.90)';
+      ctx.shadowBlur   = 10;
+      ctx.fillText('LEVEL  ' + level, 0, fontSize * 0.72);
+
+      ctx.restore();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  BOSS SYSTEM
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * spawnBoss — create the boss object and begin its entrance.
+     * The boss starts above the viewport (y = -120) and glides down
+     * to its patrol y-position over ~2 seconds (entrance phase).
+     */
+    function spawnBoss() {
+      if (boss !== null) return;   // only one at a time
+      boss = {
+        x:           canvas.width / 2,
+        y:           -120,            // starts above screen
+        targetY:     canvas.height * 0.18,  // rests at 18% down
+        hp:          BOSS_MAX_HP,
+        maxHp:       BOSS_MAX_HP,
+        scale:       3.0,             // 3× normal enemy size
+        // Patrol movement
+        vx:          80,              // horizontal patrol speed px/s
+        glowPhase:   0,
+        fireTimer:   BOSS_FIRE_INTERVAL,
+        // Entrance animation
+        entering:    true,            // true while sliding in from top
+        // Used for collision: effective half-extents = base * scale
+        w:           34,
+        h:           30,
+        // Dramatic entrance pulse
+        entrancePulse: 0
+      };
+    }
+
+    /**
+     * trySpawnBoss — check both trigger conditions and spawn if met.
+     * Called every frame from updateBoss.
+     */
+    function trySpawnBoss() {
+      if (boss !== null) return;
+      if (bossWarningActive || bossCountdownActive) return; // already queued
+
+      // Score trigger (fires once at BOSS_SCORE_TRIGGER)
+      if (!bossScoreTriggered && score >= BOSS_SCORE_TRIGGER) {
+        bossScoreTriggered = true;
+        triggerBossWarning();
+      }
+    }
+
+    /**
+     * triggerBossWarning — starts the arrival countdown sequence.
+     * Called instead of spawnBoss() directly; the countdown ticks down
+     * then transitions to the "BOSS INCOMING" banner, then spawns the boss.
+     * Safe to call even if a countdown is already running (no-op).
+     */
+    function triggerBossWarning() {
+      if (boss !== null || bossCountdownActive || bossWarningActive) return;
+      bossCountdownActive = true;
+      bossCountdownValue  = BOSS_COUNTDOWN_SECS;
+      bossCountdownFrac   = 0;
+      bossWarningActive   = false;
+      bossWarningTimer    = 0;
+      bossWarningPhase    = 0;
+    }
+
+    /**
+     * updateBossCountdown — advances the countdown and warning banner
+     * each frame. Calls spawnBoss() once the warning expires.
+     * @param {number} dt  delta time in seconds
+     */
+    function updateBossCountdown(dt) {
+      // ── Numeric countdown phase ───────────────────────────────
+      if (bossCountdownActive) {
+        bossCountdownFrac += dt;
+        if (bossCountdownFrac >= 1.0) {
+          bossCountdownFrac -= 1.0;
+          bossCountdownValue -= 1;
+          if (bossCountdownValue <= 0) {
+            // Countdown finished — switch to warning banner
+            bossCountdownActive = false;
+            bossWarningActive   = true;
+            bossWarningTimer    = BOSS_WARNING_DURATION;
+          }
+        }
+        return;
+      }
+
+      // ── Warning banner phase ──────────────────────────────────
+      if (bossWarningActive) {
+        bossWarningPhase += dt * 7.0;   // fast pulse
+        bossWarningTimer -= dt;
+        if (bossWarningTimer <= 0) {
+          bossWarningActive = false;
+          bossWarningTimer  = 0;
+          if (boss === null) {           // guard: don't double-spawn
+            spawnBoss();
+          }
+        }
+      }
+    }
+
+    /**
+     * renderBossCountdown — draws the arrival countdown or the
+     * "⚠ WARNING ⚠ / BOSS INCOMING" banner depending on phase.
+     * Renders nothing when both flags are false.
+     */
+    function renderBossCountdown() {
+      if (!bossCountdownActive && !bossWarningActive) return;
+
+      var cx = canvas.width  / 2;
+      var cy = 72;   // top-center, clear of the HUD row
+
+      // ── Numeric countdown ─────────────────────────────────────
+      if (bossCountdownActive) {
+        var n         = bossCountdownValue;
+        var isUrgent  = n <= 3;
+        // Pulse scale: starts at 1.2 on digit change, shrinks to 1.0 over 1 s
+        var scl       = 1.0 + 0.20 * Math.max(0, 1 - bossCountdownFrac);
+        var pulse     = isUrgent ? (0.6 + 0.4 * Math.sin(bossCountdownFrac * Math.PI * 6)) : 1;
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.scale(scl, scl);
+
+        // Warning flash behind text on urgent ticks
+        if (isUrgent) {
+          var flashAlpha = 0.12 * pulse;
+          ctx.beginPath();
+          ctx.arc(0, 0, 80, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,40,0,' + flashAlpha + ')';
+          ctx.fill();
+        }
+
+        // "⚠ BOSS ARRIVING IN:" label
+        var lblSize = clamp(Math.floor(canvas.width / 52), 11, 16);
+        ctx.font         = 'bold ' + lblSize + 'px "Segoe UI", monospace';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = isUrgent ? 'rgba(255,80,40,0.90)' : 'rgba(220,200,255,0.80)';
+        ctx.shadowColor  = isUrgent ? '#ff2200' : '#aa88ff';
+        ctx.shadowBlur   = 8;
+        ctx.fillText('⚠  BOSS ARRIVING IN', 0, -22);
+
+        // Big digit
+        var numSize = clamp(Math.floor(canvas.width / 12), 42, 72);
+        ctx.font         = '900 ' + numSize + 'px "Segoe UI", monospace';
+        ctx.fillStyle    = isUrgent ? '#ff3322' : '#ffffff';
+        ctx.shadowColor  = isUrgent ? '#ff0000' : '#cc88ff';
+        ctx.shadowBlur   = isUrgent ? 28 * pulse : 18;
+        ctx.fillText(String(n), 0, 28);
+
+        ctx.restore();
+        return;
+      }
+
+      // ── Warning banner ────────────────────────────────────────
+      if (bossWarningActive) {
+        var t     = bossWarningTimer / BOSS_WARNING_DURATION; // 1→0
+        var pulse2 = 0.55 + 0.45 * Math.sin(bossWarningPhase);
+        var alpha = Math.min(t * 4, 1);   // quick fade-in, hold, no fade-out
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+
+        // Background flash glow
+        var bgGrad = ctx.createRadialGradient(cx, cy + 20, 0, cx, cy + 20, 200);
+        bgGrad.addColorStop(0,   'rgba(255,30,0,' + (0.22 * pulse2) + ')');
+        bgGrad.addColorStop(1,   'rgba(0,0,0,0)');
+        ctx.fillStyle = bgGrad;
+        ctx.fillRect(0, 0, canvas.width, cy + 200);
+
+        // "⚠ WARNING ⚠"
+        var warnSize = clamp(Math.floor(canvas.width / 14), 32, 60);
+        ctx.font         = '900 ' + warnSize + 'px "Segoe UI", monospace';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = '#ff3300';
+        ctx.shadowColor  = '#ff0000';
+        ctx.shadowBlur   = 30 * pulse2;
+        ctx.globalAlpha  = alpha;
+        ctx.fillText('⚠  WARNING  ⚠', cx, cy);
+
+        // "BOSS INCOMING"
+        var incomingSize = clamp(Math.floor(canvas.width / 18), 26, 48);
+        var ig = ctx.createLinearGradient(cx - 160, 0, cx + 160, 0);
+        ig.addColorStop(0,   '#ff8844');
+        ig.addColorStop(0.5, '#ffffff');
+        ig.addColorStop(1,   '#ff4400');
+        ctx.font         = '900 ' + incomingSize + 'px "Segoe UI", monospace';
+        ctx.fillStyle    = ig;
+        ctx.shadowColor  = '#ff6600';
+        ctx.shadowBlur   = 20 * pulse2;
+        ctx.fillText('BOSS INCOMING', cx, cy + warnSize * 1.1);
+
+        ctx.restore();
+      }
+    }
+
+    /**
+     * updateBoss — tick the spawn timer, move the boss, handle firing.
+     * @param {number} dt  delta time in seconds
+     */
+    function updateBoss(dt) {
+      // ── Spawn timer ───────────────────────────────────────────
+      if (boss === null) {
+        bossSpawnTimer -= dt;
+        if (bossSpawnTimer <= 0) {
+          triggerBossWarning();
+          bossSpawnTimer = BOSS_SPAWN_TIME;
+        }
+        // Also check score trigger
+        trySpawnBoss();
+        return;
+      }
+
+      boss.glowPhase    += dt * 2.8;
+      boss.entrancePulse += dt * 4.0;
+
+      // ── Entrance slide ────────────────────────────────────────
+      if (boss.entering) {
+        boss.y += (boss.targetY - boss.y) * (1 - Math.pow(0.012, dt));
+        if (Math.abs(boss.y - boss.targetY) < 1) {
+          boss.y       = boss.targetY;
+          boss.entering = false;
+        }
+        return;   // don't fire or patrol during entrance
+      }
+
+      // ── Horizontal patrol ─────────────────────────────────────
+      boss.x += boss.vx * dt;
+      var margin = boss.w * boss.scale + 20;
+      if (boss.x > canvas.width - margin) {
+        boss.x  = canvas.width - margin;
+        boss.vx = -Math.abs(boss.vx);
+      }
+      if (boss.x < margin) {
+        boss.x  = margin;
+        boss.vx =  Math.abs(boss.vx);
+      }
+
+      // ── Fire at player ────────────────────────────────────────
+      boss.fireTimer -= dt;
+      if (boss.fireTimer <= 0) {
+        boss.fireTimer = BOSS_FIRE_INTERVAL;
+        // Aim slightly toward player x
+        var dx  = (ship.x - boss.x);
+        var len = Math.sqrt(dx * dx + 1);   // unit vector toward player
+        bossBullets.push({
+          x:  boss.x,
+          y:  boss.y + boss.h * boss.scale,
+          vx: (dx / len) * BOSS_BULLET_SPEED * 0.6,
+          vy: BOSS_BULLET_SPEED,
+          life: 4.0   // seconds before auto-cull
+        });
+      }
+
+      // ── Update boss bullets ───────────────────────────────────
+      for (var i = bossBullets.length - 1; i >= 0; i--) {
+        var bb = bossBullets[i];
+        bb.x   += bb.vx * dt;
+        bb.y   += bb.vy * dt;
+        bb.life -= dt;
+
+        // Hit player — simple circle test (40 px radius)
+        var pdx = bb.x - ship.x;
+        var pdy = bb.y - ship.y;
+        if (Math.sqrt(pdx * pdx + pdy * pdy) < 40) {
+          bossBullets.splice(i, 1);
+          if (shieldActive) {
+            shieldActive  = false;
+            activePowerUp = null;
+            spawnPuText(ship.x, ship.y - 60, 'SHIELD BLOCKED!', '#88ff44');
+          } else {
+            lives -= 1;
+            playWarningSound();
+            shakeTimer = 0.3;
+            if (lives <= 0) { lives = 0; gameState = STATE.GAMEOVER; }
+          }
+          continue;
+        }
+
+        if (bb.y > canvas.height + 20 || bb.life <= 0 ||
+            bb.x < -20 || bb.x > canvas.width + 20) {
+          bossBullets.splice(i, 1);
+        }
+      }
+    }
+
+    /**
+     * checkBossCollisions — test every player bullet against the boss.
+     * Each hit does 1 damage; at 0 HP the boss dies dramatically.
+     */
+    function checkBossCollisions() {
+      if (boss === null || boss.entering) return;
+
+      var hw = boss.w * boss.scale;
+      var hh = boss.h * boss.scale;
+
+      for (var bi = bullets.length - 1; bi >= 0; bi--) {
+        // Re-check after every killBoss() call — boss becomes null on death
+        if (boss === null) return;
+
+        var b = bullets[bi];
+        if (b.x > boss.x - hw && b.x < boss.x + hw &&
+            b.y > boss.y - hh && b.y < boss.y + hh) {
+          bullets.splice(bi, 1);
+          boss.hp -= 1;
+
+          // Small hit flash on boss
+          boss.glowPhase += 1.5;
+
+          if (boss.hp <= 0) {
+            killBoss();
+            return;   // boss is now null — stop all further checks this frame
+          }
+        }
+      }
+    }
+
+    /**
+     * killBoss — triggered when the boss reaches 0 HP.
+     * Spawns a huge particle explosion, strong shake, bright flash,
+     * awards +100 score, and removes the boss.
+     */
+    function killBoss() {
+      var bx = boss.x;
+      var by = boss.y;
+
+      // 1. Huge multi-burst particle explosion
+      for (var burst = 0; burst < 4; burst++) {
+        var ox = (Math.random() - 0.5) * 80;
+        var oy = (Math.random() - 0.5) * 60;
+        spawnBigExplosion(bx + ox, by + oy);
+      }
+      spawnBigExplosion(bx, by);   // central burst
+
+      // 2. Strong screen shake
+      shakeTimer     = 0.9;
+      SHAKE_MAGNITUDE = 18;   // temporarily boost magnitude
+      setTimeout(function () { SHAKE_MAGNITUDE = 8; }, 900);
+
+      // 3. Bright full-screen flash
+      deathFlash.active = true;
+      deathFlash.life   = deathFlash.duration;
+
+      // 4. Explosion sound (play twice for emphasis)
+      playExplosionSound();
+      setTimeout(playExplosionSound, 120);
+
+      // 5. Award score & check level-up
+      score += 100;
+      checkLevelUp();
+
+      // 6. Remove boss and clear its bullets; reset spawn timer
+      boss              = null;
+      bossBullets       = [];
+      bossSpawnTimer    = BOSS_SPAWN_TIME;
+    }
+
+    /**
+     * spawnBigExplosion — like spawnExplosion but with more, faster particles
+     * and a wider colour palette for the boss death effect.
+     */
+    function spawnBigExplosion(x, y) {
+      var colours = ['#ff8800','#ff4400','#ffcc00','#ff2200',
+                     '#ffaa44','#ffffff','#ff66ff','#4488ff'];
+      var count   = 35 + Math.floor(Math.random() * 20);
+      for (var i = 0; i < count; i++) {
+        var angle = Math.random() * Math.PI * 2;
+        var spd   = 80 + Math.random() * 300;
+        particles.push({
+          x:       x,
+          y:       y,
+          vx:      Math.cos(angle) * spd,
+          vy:      Math.sin(angle) * spd,
+          life:    0.6 + Math.random() * 0.7,
+          maxLife: 0,
+          size:    3 + Math.random() * 7,
+          colour:  colours[Math.floor(Math.random() * colours.length)]
+        });
+        particles[particles.length - 1].maxLife = particles[particles.length - 1].life;
+      }
+    }
+
+    /**
+     * renderBoss — draw the boss ship (3× scaled saucer with extra detail layers)
+     * and its health bar. Also renders boss bullets.
+     */
+    function renderBoss() {
+      if (boss === null) return;
+
+      var e     = boss;
+      var s     = e.scale;
+      var pulse = 0.5 + 0.5 * Math.sin(e.glowPhase);
+
+      ctx.save();
+      ctx.translate(e.x, e.y);
+      ctx.scale(s, s);
+
+      // ── 1. Entrance aura — extra bright halo while entering ───
+      if (e.entering) {
+        var ep = 0.4 + 0.6 * Math.abs(Math.sin(e.entrancePulse));
+        ctx.beginPath();
+        ctx.arc(0, 0, 90, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,80,0,' + (0.18 * ep) + ')';
+        ctx.fill();
+      }
+
+      // ── 2. Outer ambient glow ─────────────────────────────────
+      var outerGlow = ctx.createRadialGradient(0, 0, 10, 0, 0, 72);
+      outerGlow.addColorStop(0,   'rgba(255, 80,  0,' + (0.35 * pulse) + ')');
+      outerGlow.addColorStop(0.5, 'rgba(200, 30,  0,' + (0.18 * pulse) + ')');
+      outerGlow.addColorStop(1,   'rgba(160,  0,  0, 0.00)');
+      ctx.beginPath();
+      ctx.arc(0, 0, 72, 0, Math.PI * 2);
+      ctx.fillStyle = outerGlow;
+      ctx.fill();
+
+      // ── 3. Swept fins (wider than regular enemy) ──────────────
+      [[-1, 1], [1, -1]].forEach(function (sg) {
+        var sx = sg[0];
+        ctx.beginPath();
+        ctx.moveTo(sx * 12,  8);
+        ctx.lineTo(sx * 42, 24);
+        ctx.lineTo(sx * 36, 34);
+        ctx.lineTo(sx *  8, 18);
+        ctx.closePath();
+        var fg = ctx.createLinearGradient(sx * 42, 24, sx * 8, 8);
+        fg.addColorStop(0,   '#1a0000');
+        fg.addColorStop(0.5, '#8a1800');
+        fg.addColorStop(1,   '#dd3800');
+        ctx.fillStyle   = fg;
+        ctx.shadowColor = '#ff4400';
+        ctx.shadowBlur  = 12;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,120,0,0.60)';
+        ctx.lineWidth   = 1;
+        ctx.stroke();
+      });
+
+      // ── 4. Secondary mid-wings ────────────────────────────────
+      [[-1, 1], [1, -1]].forEach(function (sg) {
+        var sx = sg[0];
+        ctx.beginPath();
+        ctx.moveTo(sx * 34, -6);
+        ctx.lineTo(sx * 56, 10);
+        ctx.lineTo(sx * 50, 18);
+        ctx.lineTo(sx * 28,  4);
+        ctx.closePath();
+        ctx.fillStyle   = '#5a1000';
+        ctx.shadowBlur  = 6;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,80,0,0.35)';
+        ctx.lineWidth   = 0.8;
+        ctx.stroke();
+      });
+
+      // ── 5. Main saucer hull ───────────────────────────────────
+      ctx.beginPath();
+      ctx.ellipse(0, 4, 38, 18, 0, 0, Math.PI * 2);
+      var hullGrad = ctx.createLinearGradient(0, -14, 0, 22);
+      hullGrad.addColorStop(0,   '#ff7030');
+      hullGrad.addColorStop(0.4, '#dd3000');
+      hullGrad.addColorStop(0.8, '#8a1200');
+      hullGrad.addColorStop(1,   '#300000');
+      ctx.fillStyle   = hullGrad;
+      ctx.shadowColor = '#ff3300';
+      ctx.shadowBlur  = 24 * pulse;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,160,60,0.85)';
+      ctx.lineWidth   = 1.4;
+      ctx.stroke();
+
+      // ── 6. Panel details ──────────────────────────────────────
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,100,0,0.28)';
+      ctx.lineWidth   = 0.7;
+      ctx.beginPath(); ctx.ellipse(0, 4, 38, 5, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(0, 4, 22, 10, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+
+      // ── 7. Central dome ───────────────────────────────────────
+      ctx.beginPath();
+      ctx.ellipse(0, -6, 14, 12, 0, 0, Math.PI * 2);
+      var domeGrad = ctx.createRadialGradient(-4, -10, 1, 0, -6, 16);
+      domeGrad.addColorStop(0,   'rgba(255,220,180,0.95)');
+      domeGrad.addColorStop(0.4, 'rgba(220, 90, 30,0.85)');
+      domeGrad.addColorStop(1,   'rgba( 80,  0,  0,0.60)');
+      ctx.fillStyle   = domeGrad;
+      ctx.shadowColor = '#ffaa40';
+      ctx.shadowBlur  = 16;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,180,80,0.80)';
+      ctx.lineWidth   = 1;
+      ctx.stroke();
+
+      // ── 8. Pulsing triple engine rings ────────────────────────
+      var ra = 0.4 + 0.55 * pulse;
+      [-14, 0, 14].forEach(function (ox) {
+        ctx.beginPath();
+        ctx.ellipse(ox, 12, 9, 4, 0, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,110,0,' + ra + ')';
+        ctx.lineWidth   = 2.5;
+        ctx.shadowColor = '#ff5500';
+        ctx.shadowBlur  = 20 * pulse;
+        ctx.stroke();
+      });
+
+      // ── 9. Wing-tip lights ────────────────────────────────────
+      var ta = 0.5 + 0.5 * Math.sin(e.glowPhase * 1.3);
+      [[-44, 26], [44, 26], [-58, 12], [58, 12]].forEach(function (pt) {
+        ctx.beginPath();
+        ctx.arc(pt[0], pt[1], 3, 0, Math.PI * 2);
+        ctx.fillStyle   = 'rgba(255,80,0,' + ta + ')';
+        ctx.shadowColor = '#ff3300';
+        ctx.shadowBlur  = 12;
+        ctx.fill();
+      });
+
+      ctx.restore();   // end boss transform
+
+      // ── Health bar (drawn in screen-space, not scaled) ────────
+      renderBossHealthBar();
+
+      // ── Boss bullets ──────────────────────────────────────────
+      renderBossBullets();
+    }
+
+    /**
+     * renderBossHealthBar — glowing bar across the top of the screen
+     * showing the boss's remaining HP fraction.
+     */
+    function renderBossHealthBar() {
+      if (boss === null) return;
+
+      var barW   = Math.min(500, canvas.width * 0.55);
+      var barH   = 18;
+      var barX   = canvas.width / 2 - barW / 2;
+      var barY   = 52;   // below the HUD row
+      var frac   = Math.max(boss.hp / boss.maxHp, 0);
+      var pulse  = 0.7 + 0.3 * Math.sin(boss.glowPhase * 1.8);
+
+      ctx.save();
+
+      // Background track
+      ctx.fillStyle   = 'rgba(60,0,0,0.70)';
+      ctx.strokeStyle = 'rgba(200,40,0,0.50)';
+      ctx.lineWidth   = 1;
+      drawRoundRect(barX - 2, barY - 2, barW + 4, barH + 4, 6);
+      ctx.fill();
+      ctx.stroke();
+
+      // Filled portion — gradient red→orange
+      if (frac > 0) {
+        var fillGrad = ctx.createLinearGradient(barX, 0, barX + barW * frac, 0);
+        fillGrad.addColorStop(0,   '#cc0000');
+        fillGrad.addColorStop(0.5, '#ff4400');
+        fillGrad.addColorStop(1,   '#ffaa00');
+        ctx.fillStyle   = fillGrad;
+        ctx.shadowColor = '#ff4400';
+        ctx.shadowBlur  = 12 * pulse;
+        drawRoundRect(barX, barY, barW * frac, barH, 4);
+        ctx.fill();
+      }
+
+      // "BOSS" label
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      var labelSize    = clamp(Math.floor(canvas.width / 60), 10, 16);
+      ctx.font         = 'bold ' + labelSize + 'px "Segoe UI", monospace';
+      ctx.fillStyle    = 'rgba(255,200,140,' + pulse + ')';
+      ctx.shadowColor  = '#ff6600';
+      ctx.shadowBlur   = 8;
+      ctx.fillText('BOSS  ' + boss.hp + ' / ' + boss.maxHp,
+                   canvas.width / 2, barY + barH / 2);
+
+      ctx.restore();
+    }
+
+    /**
+     * renderBossBullets — draw each boss projectile as a threatening
+     * red plasma ball with a glowing trail.
+     */
+    function renderBossBullets() {
+      for (var i = 0; i < bossBullets.length; i++) {
+        var bb = bossBullets[i];
+        ctx.save();
+
+        // Outer halo
+        var halo = ctx.createRadialGradient(bb.x, bb.y, 0, bb.x, bb.y, 14);
+        halo.addColorStop(0,   'rgba(255, 80,  0, 0.40)');
+        halo.addColorStop(1,   'rgba(200,  0,  0, 0.00)');
+        ctx.beginPath();
+        ctx.arc(bb.x, bb.y, 14, 0, Math.PI * 2);
+        ctx.fillStyle = halo;
+        ctx.fill();
+
+        // Core plasma ball
+        var coreGrad = ctx.createRadialGradient(bb.x - 2, bb.y - 2, 1,
+                                                bb.x,      bb.y,     7);
+        coreGrad.addColorStop(0,   '#ffffff');
+        coreGrad.addColorStop(0.3, '#ffcc44');
+        coreGrad.addColorStop(0.7, '#ff4400');
+        coreGrad.addColorStop(1,   'rgba(200,0,0,0)');
+        ctx.beginPath();
+        ctx.arc(bb.x, bb.y, 7, 0, Math.PI * 2);
+        ctx.fillStyle   = coreGrad;
+        ctx.shadowColor = '#ff4400';
+        ctx.shadowBlur  = 16;
+        ctx.fill();
+
+        ctx.restore();
+      }
+    }
+
+    /**
+     * updateDeathFlash — tick the screen-flash timer each frame.
+     * @param {number} dt  delta time in seconds
+     */
+    function updateDeathFlash(dt) {
+      if (deathFlash.active) {
+        deathFlash.life -= dt;
+        if (deathFlash.life <= 0) {
+          deathFlash.active = false;
+          deathFlash.life   = 0;
+        }
+      }
+    }
+
+    /**
+     * renderDeathFlash — full-screen white flash overlay that fades out.
+     * Called last in render so it sits on top of everything.
+     */
+    function renderDeathFlash() {
+      if (!deathFlash.active) return;
+      var ft = deathFlash.life / deathFlash.duration;
+      ctx.save();
+      ctx.globalAlpha = ft * 0.85;
+      ctx.fillStyle   = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  POWER-UP SYSTEM
+    // ═══════════════════════════════════════════════════════════════
+
+    /** Return a random spawn interval between PU_SPAWN_MIN and PU_SPAWN_MAX. */
+    function nextPuInterval() {
+      return PU_SPAWN_MIN + Math.random() * (PU_SPAWN_MAX - PU_SPAWN_MIN);
+    }
+
+    /**
+     * spawnPowerUp — drop a random capsule from a random x near the top.
+     */
+    function spawnPowerUp() {
+      var types  = [PU.RAPID, PU.TRIPLE, PU.SHIELD];
+      var type   = types[Math.floor(Math.random() * types.length)];
+      var margin = 60;
+      powerUps.push({
+        x:         margin + Math.random() * (canvas.width - margin * 2),
+        y:         -30,
+        type:      type,
+        speed:     48,          // slow drift downward
+        r:         18,          // capsule radius for draw + collision
+        spinPhase: Math.random() * Math.PI * 2,   // drives rotation animation
+        glowPhase: Math.random() * Math.PI * 2
+      });
+    }
+
+    /**
+     * spawnPuText — create a floating notification string above the ship.
+     */
+    function spawnPuText(x, y, text, colour) {
+      puTexts.push({
+        x: x, y: y, vy: -55,
+        text:    text,
+        colour:  colour,
+        life:    1.6,
+        maxLife: 1.6
+      });
+    }
+
+    /**
+     * collectPowerUp — apply a collected power-up to the player.
+     */
+    function collectPowerUp(type) {
+      var cfg = PU_CFG[type];
+      playPickupSound();
+      spawnPuText(ship.x, ship.y - 70, cfg.label, cfg.colour);
+
+      if (type === PU.SHIELD) {
+        shieldActive  = true;
+        activePowerUp = PU.SHIELD;
+        powerUpTimer  = 0;   // shield has no timer — lasts until hit
+      } else {
+        activePowerUp = type;
+        powerUpTimer  = PU_DURATION;
+        shieldActive  = false;
+      }
+    }
+
+    /**
+     * updatePowerUps — tick spawn timer, move capsules, check collection,
+     * tick the active power-up countdown, advance floating texts.
+     * @param {number} dt  delta time in seconds
+     */
+    function updatePowerUps(dt) {
+      // ── Spawn timer ───────────────────────────────────────────
+      puSpawnTimer -= dt;
+      if (puSpawnTimer <= 0) {
+        spawnPowerUp();
+        puSpawnTimer = nextPuInterval();
+      }
+
+      // ── Move capsules + collection check ─────────────────────
+      for (var i = powerUps.length - 1; i >= 0; i--) {
+        var pu = powerUps[i];
+        pu.y         += pu.speed * dt;
+        pu.spinPhase += dt * 2.2;
+        pu.glowPhase += dt * 3.0;
+
+        // Off-screen cull
+        if (pu.y > canvas.height + 40) { powerUps.splice(i, 1); continue; }
+
+        // Collection — circle vs circle with ship centre
+        var dx = pu.x - ship.x;
+        var dy = pu.y - ship.y;
+        if (Math.sqrt(dx * dx + dy * dy) < pu.r + 36) {
+          collectPowerUp(pu.type);
+          powerUps.splice(i, 1);
+        }
+      }
+
+      // ── Active power-up countdown (timed types only) ──────────
+      if (activePowerUp && activePowerUp !== PU.SHIELD) {
+        powerUpTimer -= dt;
+        if (powerUpTimer <= 0) {
+          activePowerUp = null;
+          powerUpTimer  = 0;
+        }
+      }
+
+      // ── Floating texts ────────────────────────────────────────
+      for (var j = puTexts.length - 1; j >= 0; j--) {
+        var pt = puTexts[j];
+        pt.y    += pt.vy * dt;
+        pt.life -= dt;
+        if (pt.life <= 0) { puTexts.splice(j, 1); }
+      }
+    }
+
+    /**
+     * renderPowerUps — draw each capsule as a glowing spinning gem,
+     * then draw the floating pickup texts.
+     */
+    function renderPowerUps() {
+      // ── Capsules ─────────────────────────────────────────────
+      for (var i = 0; i < powerUps.length; i++) {
+        var pu    = powerUps[i];
+        var cfg   = PU_CFG[pu.type];
+        var pulse = 0.65 + 0.35 * Math.sin(pu.glowPhase);
+        var r     = pu.r;
+
+        ctx.save();
+        ctx.translate(pu.x, pu.y);
+        ctx.rotate(pu.spinPhase * 0.4);
+
+        // Outer glow
+        var glow = ctx.createRadialGradient(0, 0, r * 0.3, 0, 0, r * 2.2);
+        glow.addColorStop(0,   cfg.colour.replace(')', ', 0.35)').replace('rgb', 'rgba') || 'rgba(255,255,255,0.25)');
+        glow.addColorStop(1,   'rgba(0,0,0,0)');
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 2.2, 0, Math.PI * 2);
+        ctx.fillStyle = glow;
+        ctx.fill();
+
+        // Hexagon body
+        ctx.beginPath();
+        for (var k = 0; k < 6; k++) {
+          var ang = (k / 6) * Math.PI * 2 - Math.PI / 6;
+          var px  = Math.cos(ang) * r;
+          var py  = Math.sin(ang) * r;
+          if (k === 0) { ctx.moveTo(px, py); } else { ctx.lineTo(px, py); }
+        }
+        ctx.closePath();
+        var bodyGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, 0, 0, 0, r);
+        bodyGrad.addColorStop(0,   '#ffffff');
+        bodyGrad.addColorStop(0.3, cfg.colour);
+        bodyGrad.addColorStop(1,   cfg.glow);
+        ctx.fillStyle   = bodyGrad;
+        ctx.shadowColor = cfg.glow;
+        ctx.shadowBlur  = 18 * pulse;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.60)';
+        ctx.lineWidth   = 1.5;
+        ctx.stroke();
+
+        // Icon letter in centre
+        ctx.shadowBlur   = 0;
+        ctx.font         = 'bold ' + Math.round(r * 1.1) + 'px "Segoe UI", monospace';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = '#ffffff';
+        var icon = pu.type === PU.RAPID ? 'R' : pu.type === PU.TRIPLE ? 'T' : 'S';
+        ctx.fillText(icon, 0, 1);
+
+        ctx.restore();
+      }
+
+      // ── Floating pickup texts ─────────────────────────────────
+      for (var j = 0; j < puTexts.length; j++) {
+        var pt    = puTexts[j];
+        var alpha = pt.life / pt.maxLife;
+        var fsize = clamp(Math.floor(canvas.width / 38), 14, 22);
+        ctx.save();
+        ctx.globalAlpha  = alpha;
+        ctx.font         = 'bold ' + fsize + 'px "Segoe UI", monospace';
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle    = pt.colour;
+        ctx.shadowColor  = pt.colour;
+        ctx.shadowBlur   = 14 * alpha;
+        ctx.fillText(pt.text, pt.x, pt.y);
+        ctx.restore();
+      }
+    }
+
+    /**
+     * renderPowerUpHUD — shows the active power-up name + countdown bar
+     * in the top-right corner, just below the lives row.
+     */
+    function renderPowerUpHUD() {
+      if (!activePowerUp) return;
+
+      var cfg  = PU_CFG[activePowerUp];
+      var pad  = 18;
+      var barW = 140;
+      var barH = 10;
+      var bx   = canvas.width - pad - barW;
+      var by   = 52;                          // sits below the lives row
+      var size = clamp(Math.floor(canvas.width / 52), 11, 16);
+
+      ctx.save();
+
+      // Label
+      ctx.font         = 'bold ' + size + 'px "Segoe UI", monospace';
+      ctx.textAlign    = 'right';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle    = cfg.colour;
+      ctx.shadowColor  = cfg.glow;
+      ctx.shadowBlur   = 10;
+      var label = (activePowerUp === PU.SHIELD)
+                    ? '⬡  SHIELD'
+                    : '⬡  ' + (activePowerUp === PU.RAPID ? 'RAPID FIRE' : 'TRIPLE SHOT');
+      ctx.fillText(label, canvas.width - pad, by);
+
+      // Timer bar (not drawn for shield — it has no duration)
+      if (activePowerUp !== PU.SHIELD) {
+        var frac = Math.max(powerUpTimer / PU_DURATION, 0);
+        var pulse = 0.7 + 0.3 * Math.sin(Date.now() * 0.008);
+
+        // Track
+        ctx.fillStyle   = 'rgba(255,255,255,0.12)';
+        ctx.shadowBlur  = 0;
+        drawRoundRect(bx, by + size + 5, barW, barH, 4);
+        ctx.fill();
+
+        // Fill
+        if (frac > 0) {
+          var fillGrad = ctx.createLinearGradient(bx, 0, bx + barW * frac, 0);
+          fillGrad.addColorStop(0,   cfg.glow);
+          fillGrad.addColorStop(1,   cfg.colour);
+          ctx.fillStyle   = fillGrad;
+          ctx.shadowColor = cfg.glow;
+          ctx.shadowBlur  = 8 * pulse;
+          drawRoundRect(bx, by + size + 5, barW * frac, barH, 4);
+          ctx.fill();
+        }
+
+        // Seconds remaining text
+        ctx.font         = (size - 2) + 'px "Segoe UI", monospace';
+        ctx.textAlign    = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle    = 'rgba(255,255,255,0.75)';
+        ctx.shadowBlur   = 0;
+        ctx.fillText(powerUpTimer.toFixed(1) + 's',
+                     canvas.width - pad, by + size + barH + 8);
+      }
+
+      ctx.restore();
+    }
+
+    /**
+     * renderShieldAura — draws a translucent hexagonal shield ring around
+     * the player ship when shieldActive is true.
+     */
+    function renderShieldAura() {
+      if (!shieldActive) return;
+      var pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.006);
+      ctx.save();
+      ctx.translate(ship.x, ship.y);
+
+      // Outer ring
+      ctx.beginPath();
+      ctx.arc(0, 0, 58, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(136,255,68,' + (0.55 * pulse + 0.2) + ')';
+      ctx.lineWidth   = 2.5;
+      ctx.shadowColor = '#88ff44';
+      ctx.shadowBlur  = 20 * pulse;
+      ctx.stroke();
+
+      // Inner glow fill
+      var sg = ctx.createRadialGradient(0, 0, 20, 0, 0, 58);
+      sg.addColorStop(0,   'rgba(136,255,68,0.00)');
+      sg.addColorStop(0.7, 'rgba(136,255,68,' + (0.08 * pulse) + ')');
+      sg.addColorStop(1,   'rgba(136,255,68,' + (0.18 * pulse) + ')');
+      ctx.beginPath();
+      ctx.arc(0, 0, 58, 0, Math.PI * 2);
+      ctx.fillStyle = sg;
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  UTILITY HELPERS
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * drawRoundRect — builds a rounded-rectangle path on ctx.
+     * Caller must call ctx.fill() and/or ctx.stroke() afterwards.
+     */
+    function drawRoundRect(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y,     x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h,     x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y,         x + r, y);
+      ctx.closePath();
+    }
+
+    /** clamp — constrain val to [min, max]. */
+    function clamp(val, min, max) {
+      return Math.min(max, Math.max(min, val));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  CORE LOOP  —  resize / input / update / render / init
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * resize — match canvas pixel dimensions to the browser viewport.
+     * Stars are re-scattered and the ship is re-centred to fit the new size.
+     */
+    function resize() {
+      canvas.width  = window.innerWidth;
+      canvas.height = window.innerHeight;
+      initStars();
+      // Re-anchor ship vertically; keep its current horizontal position if playing
+      if (gameState === STATE.PLAYING) {
+        ship.y = canvas.height - 90;
+        ship.x = clamp(ship.x, ship.w, canvas.width - ship.w);
+      }
+    }
+
+    /**
+     * input — read the key map once per frame and act on it.
+     * Start-screen: ENTER → transition to PLAYING state.
+     */
+    function input() {
+      // ── Start screen → Playing ────────────────────────────────
+      if (gameState === STATE.START && keys['Enter']) {
+        keys['Enter']      = false;
+        score              = 0;
+        lives              = MAX_LIVES;
+        level              = 1;
+        levelUpTimer       = 0;
+        shakeTimer         = 0;
+        bullets            = [];
+        enemies            = [];
+        particles          = [];
+        boss               = null;
+        bossBullets        = [];
+        bossSpawnTimer     = BOSS_SPAWN_TIME;
+        bossScoreTriggered = false;
+        deathFlash.active  = false;
+        deathFlash.life    = 0;
+        powerUps           = [];
+        puTexts            = [];
+        puSpawnTimer       = 8;
+        activePowerUp      = null;
+        powerUpTimer       = 0;
+        shieldActive       = false;
+        shootCooldown      = 0;
+        muzzleFlash.active = false;
+        enemySpawnTimer    = nextSpawnInterval();
+        gameState          = STATE.PLAYING;
+        initShip();
+        // Start BGM on first ENTER press (satisfies autoplay policy)
+        bgmStarted = true;
+        bgmPlay();
+      }
+
+      // ── Game Over screen → Restart ────────────────────────────
+      if (gameState === STATE.GAMEOVER && keys['Enter']) {
+        keys['Enter'] = false;
+        resetGame();
+        // resetGame sets gameState = PLAYING; resume BGM
+        bgmPlay();
+      }
+
+      // ── P — pause / resume ────────────────────────────────────
+      if (keys['p'] || keys['P']) {
+        keys['p'] = false;
+        keys['P'] = false;
+        if (gameState === STATE.PLAYING) {
+          gameState = STATE.PAUSED;
+          bgmPause();
+        } else if (gameState === STATE.PAUSED) {
+          gameState = STATE.PLAYING;
+          bgmPlay();
+        }
+      }
+
+      // ── SPACE — fire a bullet (respects cooldown) ─────────────
+      if (gameState === STATE.PLAYING && keys[' '] && shootCooldown <= 0) {
+        spawnBullet();
+        // Rapid Fire halves the cooldown
+        shootCooldown = (activePowerUp === PU.RAPID) ? SHOOT_DELAY * 0.4 : SHOOT_DELAY;
+      }
+    }
+
+    /**
+     * update — advance all game logic by dt seconds.
+     * @param {number} dt  delta time in seconds
+     */
+    function update(dt) {
+      updateStars(dt);
+      if (gameState === STATE.PLAYING) {
+        updateShip(dt);
+        updateBullets(dt);
+        updateEnemies(dt);
+        updateBoss(dt);
+        updateBossCountdown(dt);
+        checkCollisions();
+        checkBossCollisions();
+        updatePowerUps(dt);
+        updateParticles(dt);
+        updateLevelEffects(dt);
+        updateDeathFlash(dt);
+      }
+      if (gameState === STATE.GAMEOVER) {
+        updateParticles(dt);
+        updateDeathFlash(dt);
+      }
+    }
+
+    /**
+     * render — clear and redraw the full scene for this frame.
+     * @param {number} dt  delta time passed to animated renderers
+     */
+    function render(dt) {
+      // Apply camera shake before any drawing; restore afterwards
+      var shaking = applyCameraShake();
+
+      renderBackground();
+
+      if (gameState === STATE.START) {
+        renderStartScreen(dt);
+      }
+      if (gameState === STATE.PLAYING) {
+        renderEnemies();
+        renderBoss();           // boss hull + health bar + boss bullets
+        renderPowerUps();       // falling capsules + floating pickup texts
+        renderBullets();
+        renderParticles();
+        renderShieldAura();     // green ring around ship when shield is active
+        renderShip();
+        renderHUD();
+        renderPowerUpHUD();     // active power-up name + countdown bar
+        renderLevelUpBanner();
+        renderBossCountdown();  // arrival countdown + warning banner
+        renderDeathFlash();     // full-screen flash sits on top of everything
+      }
+      if (gameState === STATE.GAMEOVER) {
+        renderEnemies();
+        renderBoss();
+        renderParticles();
+        renderDeathFlash();
+        renderGameOver(dt);
+      }
+
+      // Undo the shake translation (must be last)
+      if (shaking) { ctx.restore(); }
+    }
+
+    /**
+     * gameLoop — the main requestAnimationFrame callback.
+     * Delta time is capped at 50 ms to prevent physics spikes on
+     * hidden/throttled tabs.
+     * @param {DOMHighResTimeStamp} timestamp
+     */
+    function gameLoop(timestamp) {
+      var dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+      lastTime = timestamp;
+
+      input();
+      update(dt);
+      render(dt);
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    /**
+     * init — entry point.
+     * Sizes the canvas, attaches event listeners, starts the loop.
+     */
+    function init() {
+      // Match canvas to viewport
+      resize();
+
+      // Keyboard: track held keys
+      window.addEventListener('keydown', function (e) {
+        keys[e.key] = true;
+        // Prevent arrow keys and Space from scrolling the page
+        if (e.key === 'ArrowLeft'  ||
+            e.key === 'ArrowRight' ||
+            e.key === 'ArrowUp'    ||
+            e.key === 'ArrowDown'  ||
+            e.key === ' ') {
+          e.preventDefault();
+        }
+        // Autoplay retry: if BGM was started but is still paused due to a
+        // browser autoplay block, any subsequent key press will unblock it.
+        if (bgmStarted && gameState === STATE.PLAYING) {
+          bgmPlay();
+        }
+      });
+
+      window.addEventListener('keyup', function (e) {
+        keys[e.key] = false;
+      });
+
+      // Keep canvas full-screen on resize
+      window.addEventListener('resize', resize);
+
+      // Pause BGM when the tab is hidden; resume when it becomes visible again
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+          bgmPause();
+        } else {
+          // Only resume if the game is actively playing
+          if (bgmStarted && gameState === STATE.PLAYING) {
+            bgmPlay();
+          }
+        }
+      });
+
+      // Seed lastTime then start the loop on the next paint
+      requestAnimationFrame(function (ts) {
+        lastTime = ts;
+        requestAnimationFrame(gameLoop);
+      });
+    }
+
+    // ── Boot ──────────────────────────────────────────────────────
+    init();
+  </script>
+</body>
+</html>
